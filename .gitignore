@@ -1,0 +1,7 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.mock-data/
+openclaw_launcher.log
+install_state.json

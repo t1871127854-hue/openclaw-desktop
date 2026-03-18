@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import {appApi} from './services/appApi';
+import type {DiagnosticIssue, EnvironmentStatus, InstallState, OperationFailureInfo, StatusType} from './types/api';
 import { 
   Shield, 
   Monitor, 
@@ -29,64 +31,6 @@ import { twMerge } from 'tailwind-merge';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
-}
-
-// --- Types ---
-
-declare global {
-  interface Window {
-    electron: {
-      invoke: (channel: string, ...args: any[]) => Promise<any>;
-      on: (channel: string, callback: (...args: any[]) => void) => () => void;
-    };
-  }
-}
-
-// Mock electron for web preview
-if (typeof window !== 'undefined' && !window.electron) {
-  (window as any).electron = {
-    invoke: async (channel: string, ...args: any[]) => {
-      console.log(`[Web Mock] Invoking ${channel}`, args);
-      const endpointMap: Record<string, string> = {
-        'get-status': '/api/status',
-        'read-config': '/api/read-config',
-        'test-model': '/api/test-model',
-        'test-channel': '/api/test-channel',
-        'get-logs': '/api/logs',
-        'execute-action': '/api/execute',
-        'get-state': '/api/get-state',
-        'set-state': '/api/set-state',
-        'write-config': '/api/writeConfig'
-      };
-      
-      const endpoint = endpointMap[channel];
-      if (!endpoint) return { success: false, error: `Unknown channel: ${channel}` };
-
-      try {
-        const method = channel.startsWith('get') || channel === 'read-config' ? 'GET' : 'POST';
-        const options: RequestInit = {
-          method,
-          headers: { 'Content-Type': 'application/json' }
-        };
-        if (method === 'POST') options.body = JSON.stringify(args[0] || {});
-        
-        const response = await fetch(endpoint, options);
-        if (channel === 'get-logs') return await response.text();
-        return await response.json();
-      } catch (e: any) {
-        return { success: false, error: e.message };
-      }
-    },
-    on: () => () => {}
-  };
-}
-
-type StatusType = 'installed' | 'not_installed' | 'reboot_required' | 'configured' | 'not_configured' | 'running' | 'stopped' | 'error' | 'loading';
-
-interface InstallState {
-  currentStep: number;
-  completed: string[];
-  isInstalling: boolean;
 }
 
 // --- Components ---
@@ -139,7 +83,7 @@ const Card = ({ children, className }: { children: React.ReactNode, className?: 
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('home');
-  const [envStatus, setEnvStatus] = useState<any>({
+  const [envStatus, setEnvStatus] = useState<EnvironmentStatus>({
     isAdmin: false,
     node: { isOk: false, version: '' },
     git: { isOk: false, version: '' },
@@ -153,6 +97,7 @@ export default function App() {
   });
   const [installState, setInstallState] = useState<InstallState>({ currentStep: 0, completed: [], isInstalling: false });
   const [logs, setLogs] = useState('');
+  const [diagnostics, setDiagnostics] = useState<DiagnosticIssue[]>([]);
   const [bailianKey, setBailianKey] = useState('');
   const [deepseekKey, setDeepseekKey] = useState('');
   const [zhipuKey, setZhipuKey] = useState('');
@@ -188,11 +133,13 @@ export default function App() {
   const refreshStatus = async () => {
     setIsRefreshing(true);
     try {
-      const data = await window.electron.invoke('get-status');
+      const data = await appApi.getStatus();
       if (data.error) {
         console.error("Status check error", data.error);
       } else {
         setEnvStatus(data);
+        setDiagnostics(data.diagnostics || []);
+        setInstallState((prev) => ({...prev, isInstalling: Boolean(data.installWorkflow?.active)}));
       }
     } catch (err) {
       console.error("Failed to invoke get-status", err);
@@ -203,7 +150,7 @@ export default function App() {
 
   const loadConfig = async () => {
     try {
-      const config = await window.electron.invoke('read-config');
+      const config = await appApi.readConfig();
       
       // Load Channels
       if (config.channels?.feishu) {
@@ -240,7 +187,7 @@ export default function App() {
   const testModel = async (provider: string, config: any) => {
     setTestResult({ provider, message: "测试中...", success: true });
     try {
-      const data = await window.electron.invoke('test-model', { provider, config });
+      const data = await appApi.testModel({ provider, config });
       setTestResult({ provider, message: data.message, success: data.success });
     } catch (err: any) {
       setTestResult({ provider, message: `测试失败: ${err.message}`, success: false });
@@ -250,7 +197,7 @@ export default function App() {
   const testChannel = async (channel: string, config: any) => {
     setChannelTestResult({ channel, message: "测试中...", success: true });
     try {
-      const data = await window.electron.invoke('test-channel', { channel, config });
+      const data = await appApi.testChannel({ channel, config });
       setChannelTestResult({ channel, message: data.message, success: data.success });
     } catch (err: any) {
       setChannelTestResult({ channel, message: `测试失败: ${err.message}`, success: false });
@@ -259,21 +206,50 @@ export default function App() {
 
   const fetchLogs = async () => {
     try {
-      const data = await window.electron.invoke('get-logs');
+      const data = await appApi.getLogs();
       setLogs(data);
     } catch (err) {
       console.error("Failed to fetch logs", err);
     }
   };
 
+  const runDiagnostics = async () => {
+    try {
+      const issues = await appApi.runDiagnostics();
+      setDiagnostics(issues);
+      return issues;
+    } catch (err) {
+      console.error('Failed to run diagnostics', err);
+      return [];
+    }
+  };
+
+  const repairDiagnostic = async (id: string) => {
+    showNotification(`正在修复: ${id}...`, 'info');
+    try {
+      const result = await appApi.repairDiagnostic(id);
+      if (result.success) {
+        showNotification(result.result || '修复完成', 'success');
+      } else {
+        showNotification(result.error || '修复失败', 'error');
+      }
+      await refreshStatus();
+      await runDiagnostics();
+      await fetchLogs();
+    } catch (err: any) {
+      showNotification(err.message || '修复执行失败', 'error');
+    }
+  };
+
   const executeAction = async (step: string, action?: string, extra?: any) => {
     showNotification(`正在执行: ${step}...`, 'info');
     try {
-      const data = await window.electron.invoke('execute-action', { step, action, ...extra });
+      const data = await appApi.executeAction({ step, action, ...extra });
+      await refreshStatus();
+      await runDiagnostics();
+      await fetchLogs();
       if (data.success) {
         showNotification(data.result || "操作成功完成", 'success');
-        await refreshStatus();
-        await fetchLogs();
         return true;
       } else {
         showNotification(`操作失败: ${data.error}`, 'error');
@@ -291,29 +267,42 @@ export default function App() {
       await refreshStatus();
       await fetchLogs();
       await loadConfig();
-      
+      await runDiagnostics();
+
       try {
-        const state = await window.electron.invoke('get-state');
-        if (state.isInstalling) {
-          setInstallState(state);
-          handleInstallAll();
-        }
+        const state = await appApi.getState();
+        setInstallState(state);
       } catch (err) {
         console.error("Failed to fetch state", err);
       }
     };
-    init();
-    const interval = setInterval(fetchLogs, 2000);
-    return () => clearInterval(interval);
+
+    void init();
+
+    const unsubscribe = appApi.subscribeLogs((entry) => {
+      setLogs((prev) => `${prev}${prev ? '\n' : ''}[${entry.timestamp}] [${entry.source.toUpperCase()}] [${entry.level.toUpperCase()}] ${entry.message}`);
+    });
+
+    const interval = window.openClaw ? undefined : setInterval(fetchLogs, 2000);
+
+    return () => {
+      unsubscribe();
+      if (interval) clearInterval(interval);
+    };
   }, []);
 
   useEffect(() => {
-    window.electron.invoke('set-state', installState);
+    appApi.setState(installState);
   }, [installState]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
+
+
+  const workflowStages = ['detect-environment', 'choose-mode', 'resolve-resources', 'import-download-resources', 'install-runtime', 'validate-post-install', 'start-gateway', 'completed'];
+  const workflowStageIndex = envStatus.installWorkflow ? workflowStages.indexOf(envStatus.installWorkflow.stage) : -1;
+  const workflowProgress = workflowStageIndex >= 0 ? Math.min(((workflowStageIndex + 1) / workflowStages.length) * 100, 100) : 0;
 
   const installSteps = [
     { id: 'admin', name: '管理员权限', check: () => envStatus.isAdmin },
@@ -325,28 +314,26 @@ export default function App() {
     { id: 'setupGateway', name: '配置 Gateway', check: () => envStatus.gateway === 'running' },
   ];
 
+  const installProgressItems = (envStatus.installWorkflow?.history.length
+    ? envStatus.installWorkflow.history.map((step, index) => ({
+        id: `${step.stage}-${index}`,
+        label: step.message,
+        status: step.status,
+      }))
+    : installSteps.map((step) => ({
+        id: step.id,
+        label: step.name,
+        status: step.check() ? 'completed' : 'running',
+      })));
+
   const handleInstallAll = async () => {
-    showNotification("正在开始一键安装/修复流程...", 'info');
+    showNotification("正在开始安装向导...", 'info');
     setInstallState(prev => ({ ...prev, isInstalling: true }));
-    for (const step of installSteps) {
-      if (!step.check()) {
-        if (step.id === 'admin') {
-          showNotification("请以管理员身份重新运行此程序！", 'error');
-          setInstallState(prev => ({ ...prev, isInstalling: false }));
-          return;
-        }
-        const success = await executeAction(step.id);
-        if (!success) {
-          setInstallState(prev => ({ ...prev, isInstalling: false }));
-          return;
-        }
-        // Wait for status to update
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        await refreshStatus();
-      }
-    }
+    const success = await executeAction('runInstallWizard', undefined, { mode: 'hybrid' });
     setInstallState(prev => ({ ...prev, isInstalling: false }));
-    showNotification("安装/修复流程已完成！", 'success');
+    if (success) {
+      showNotification("安装向导已完成！", 'success');
+    }
   };
 
   const EnvItem = ({ icon: Icon, label, status, sub, onFix }: any) => (
@@ -373,6 +360,54 @@ export default function App() {
       </div>
     </Card>
   );
+
+  const FailureSummaryCard = ({
+    title,
+    failure,
+  }: {
+    title: string;
+    failure?: OperationFailureInfo;
+  }) => {
+    if (!failure) return null;
+
+    return (
+      <Card className="p-4 border-rose-500/20 bg-rose-500/5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-white">{title}</h3>
+            <p className="text-xs text-rose-300 mt-1">{failure.userFacingMessage}</p>
+          </div>
+          <StatusBadge status="error" />
+        </div>
+        <div className="mt-3 space-y-2 text-xs">
+          <p className="text-zinc-300">
+            <span className="text-zinc-500">失败阶段：</span>
+            <code className="bg-zinc-950 px-1.5 py-0.5 rounded text-zinc-200">{failure.stage}</code>
+          </p>
+          <p className="text-zinc-300">
+            <span className="text-zinc-500">可重试：</span>
+            {failure.retryable ? '是' : '否'}
+          </p>
+          {failure.recommendedModeSwitch && (
+            <p className="text-zinc-300">
+              <span className="text-zinc-500">建议模式：</span>
+              <span className="text-amber-300">{failure.recommendedModeSwitch}</span>
+            </p>
+          )}
+          {failure.suggestedActions.length > 0 && (
+            <div>
+              <p className="text-zinc-500 mb-1">建议操作：</p>
+              <ul className="space-y-1 list-disc pl-4 text-zinc-300">
+                {failure.suggestedActions.map((action, index) => (
+                  <li key={`${title}-action-${index}`}>{action}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </Card>
+    );
+  };
 
   const DownloadItem = ({ name, url, desc }: any) => (
     <div className="p-3 bg-zinc-950 border border-zinc-800 rounded-lg flex items-center justify-between group">
@@ -404,6 +439,100 @@ export default function App() {
           <RefreshCw size={20} className={isRefreshing ? "animate-spin" : ""} />
         </button>
       </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-6 gap-4">
+        <Card className="p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500 uppercase">Node</span>
+            <StatusBadge status={envStatus.node?.isOk ? 'installed' : 'error'} />
+          </div>
+          <p className="text-sm text-zinc-200">{envStatus.nodeDetails?.version || '未检测到'}</p>
+        </Card>
+        <Card className="p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500 uppercase">WSL</span>
+            <StatusBadge status={envStatus.wsl || 'loading'} />
+          </div>
+          <p className="text-sm text-zinc-200 truncate">{envStatus.wslDetails?.defaultDistro || '未设置默认发行版'}</p>
+        </Card>
+        <Card className="p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500 uppercase">Port 18789</span>
+            <StatusBadge status={envStatus.port18789?.occupied ? 'error' : 'installed'} />
+          </div>
+          <p className="text-sm text-zinc-200">{envStatus.port18789?.occupied ? `PID ${envStatus.port18789.pid || '未知'} 占用` : '端口空闲'}</p>
+        </Card>
+        <Card className="p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500 uppercase">Gateway</span>
+            <StatusBadge status={envStatus.gateway || 'loading'} />
+          </div>
+          <p className="text-sm text-zinc-200">{envStatus.gatewayDetails?.pid ? `PID ${envStatus.gatewayDetails.pid}` : '未启动 / placeholder'}</p>
+        </Card>
+        <Card className="p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500 uppercase">安装阶段</span>
+            <StatusBadge status={envStatus.installWorkflow?.stage === 'failed' ? 'error' : envStatus.installWorkflow?.stage === 'completed' ? 'installed' : envStatus.installWorkflow?.active ? 'loading' : 'stopped'} />
+          </div>
+          <p className="text-sm text-zinc-200">{envStatus.installWorkflow?.stage || 'idle'}</p>
+        </Card>
+        <Card className="p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500 uppercase">升级计划</span>
+            <StatusBadge status={envStatus.upgradePlan?.status === 'required-update' ? 'error' : envStatus.upgradePlan?.status === 'optional-update' ? 'configured' : envStatus.upgradePlan?.status === 'no-update' ? 'installed' : 'stopped'} />
+          </div>
+          <p className="text-sm text-zinc-200">{envStatus.upgradePlan?.status || 'blocked'}</p>
+        </Card>
+      </div>
+
+      {(envStatus.installFailure || envStatus.upgradeFailure) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FailureSummaryCard title="安装失败摘要" failure={envStatus.installFailure} />
+          <FailureSummaryCard title="升级失败摘要" failure={envStatus.upgradeFailure} />
+        </div>
+      )}
+
+      {envStatus.upgradeExecution && (
+        <Card className="p-4 border-zinc-700/80">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-bold text-white">升级执行摘要</h3>
+              <p className="text-xs text-zinc-400 mt-1">仅展示半执行骨架结果，不表示已完成真实替换。</p>
+            </div>
+            <StatusBadge status={envStatus.upgradeExecution.status === 'blocked' || envStatus.upgradeExecution.status === 'failed' ? 'error' : envStatus.upgradeExecution.status === 'rolled-back' ? 'stopped' : 'configured'} />
+          </div>
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+            <div className="space-y-2">
+              <p className="text-zinc-300"><span className="text-zinc-500">状态：</span>{envStatus.upgradeExecution.status}</p>
+              <p className="text-zinc-300"><span className="text-zinc-500">Rollback 可用：</span>{envStatus.upgradeExecution.rollbackAvailable ? '是' : '否'}</p>
+              <p className="text-zinc-500">已执行步骤：</p>
+              <ul className="space-y-1 text-zinc-300">
+                {envStatus.upgradeExecution.executedSteps.length > 0 ? envStatus.upgradeExecution.executedSteps.map((step) => (
+                  <li key={step.id}>• {step.id}: {step.detail}</li>
+                )) : <li>• 暂无</li>}
+              </ul>
+            </div>
+            <div className="space-y-2">
+              <p className="text-zinc-500">跳过 / 阻塞：</p>
+              <ul className="space-y-1 text-zinc-300">
+                {envStatus.upgradeExecution.skippedSteps.length > 0 ? envStatus.upgradeExecution.skippedSteps.map((step) => (
+                  <li key={step.id}>• {step.id}: {step.detail}</li>
+                )) : <li>• 暂无</li>}
+              </ul>
+              {envStatus.upgradeExecution.blockers.length > 0 && (
+                <>
+                  <p className="text-zinc-500 pt-1">Blockers：</p>
+                  <ul className="space-y-1 text-rose-300">
+                    {envStatus.upgradeExecution.blockers.map((blocker, index) => (
+                      <li key={`blocker-${index}`}>• {blocker}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         {/* Official Path */}
@@ -441,15 +570,15 @@ export default function App() {
               icon={Terminal} 
               label="Node.js 运行时" 
               status={envStatus.node?.isOk ? 'installed' : 'error'} 
-              sub={envStatus.node?.version !== 'not_installed' ? `WSL 内部版本: ${envStatus.node?.version} (含 npm)` : 'WSL 内未检测到'}
-              onFix={() => executeAction('setupGateway')}
+              sub={envStatus.nodeDetails?.version ? `Windows 版本: ${envStatus.nodeDetails.version}` : 'Windows 未检测到 Node'}
+              onFix={() => executeAction('installNodeOffline')}
             />
             <EnvItem 
               icon={Terminal} 
               label="Git (WSL)" 
               status={envStatus.git?.isOk ? 'installed' : 'error'} 
-              sub={envStatus.git?.version !== 'not_installed' ? `WSL 内部版本: ${envStatus.git?.version}` : 'WSL 内未检测到'}
-              onFix={() => executeAction('setupGateway')}
+              sub={envStatus.git?.version !== 'not_installed' ? `Windows Git 版本: ${envStatus.git?.version}` : 'Windows 未检测到 Git'}
+              onFix={() => refreshStatus()}
             />
           </div>
           <button 
@@ -522,7 +651,9 @@ export default function App() {
           <p className="text-[10px] text-zinc-500 leading-relaxed">
             检测路径: <code className="bg-zinc-950 px-1 rounded text-zinc-400">{envStatus.localResources?.path}</code>
             <br />
-            请将下载好的资源放入此文件夹，启动器将自动代入安装。
+模式建议: <strong className="text-zinc-300">{envStatus.offlineResources?.modeSuggestion || 'online'}</strong>。
+            <br />
+            {envStatus.offlineResources?.advice?.join('；')}
           </p>
         </div>
       </Card>
@@ -1122,9 +1253,9 @@ export default function App() {
             </div>
             <StatusBadge status="installed" />
           </div>
-          <p className="text-xs text-zinc-500">OpenClaw 默认开启的网页对话界面，无需额外配置，启动 Gateway 后即可通过 127.0.0.1:8080 访问。</p>
+          <p className="text-xs text-zinc-500">OpenClaw 默认开启的网页对话界面，无需额外配置，启动 Gateway 后即可通过 127.0.0.1:18789 访问。</p>
           <button 
-            onClick={() => executeAction('openUrl', undefined, { url: 'http://127.0.0.1:8080' })}
+            onClick={() => executeAction('openUrl', undefined, { url: 'http://127.0.0.1:18789' })}
             className="w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg font-medium transition-colors"
           >
             立即访问
@@ -1138,43 +1269,53 @@ export default function App() {
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold text-white">运行状态</h2>
-        <p className="text-zinc-400 text-sm mt-1">监控 OpenClaw 核心组件的实时运行情况</p>
+        <p className="text-zinc-400 text-sm mt-1">监控 Node / WSL / 端口 / Gateway 的真实检测结果</p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-6 gap-4">
+        <Card className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500 uppercase">Node</span>
+            <StatusBadge status={envStatus.node?.isOk ? 'installed' : 'error'} />
+          </div>
+          <div className="text-sm text-zinc-300">{envStatus.nodeDetails?.version || '未检测到'}</div>
+        </Card>
+        <Card className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500 uppercase">WSL</span>
+            <StatusBadge status={envStatus.wsl || 'loading'} />
+          </div>
+          <div className="text-sm text-zinc-300 truncate">{envStatus.wslDetails?.defaultDistro || '无默认发行版'}</div>
+        </Card>
+        <Card className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500 uppercase">Port 18789</span>
+            <StatusBadge status={envStatus.port18789?.occupied ? 'error' : 'installed'} />
+          </div>
+          <div className="text-sm text-zinc-300">{envStatus.port18789?.occupied ? `PID ${envStatus.port18789.pid || '未知'} 占用` : '端口空闲'}</div>
+        </Card>
         <Card className="p-4 space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-zinc-500 uppercase">Gateway</span>
             <StatusBadge status={envStatus.gateway || 'loading'} />
           </div>
-          <div className="flex items-center gap-2">
-            <div className={cn("w-2 h-2 rounded-full", envStatus.gateway === 'running' ? "bg-emerald-500 animate-pulse" : "bg-zinc-700")} />
-            <span className="text-xl font-bold text-white">127.0.0.1:8080</span>
-          </div>
-        </Card>
-        <Card className="p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-zinc-500 uppercase">配置文件</span>
-            <StatusBadge status={envStatus.configExists ? 'configured' : 'not_configured'} />
-          </div>
-          <div className="text-sm text-zinc-300 truncate">~/.openclaw/openclaw.json</div>
-        </Card>
-        <Card className="p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-zinc-500 uppercase">技能包</span>
-            <StatusBadge status={envStatus.skillPackExists ? 'installed' : 'not_installed'} />
-          </div>
-          <div className="text-sm text-zinc-300">已加载核心技能</div>
+          <div className="text-sm text-zinc-300 truncate">{envStatus.gatewayDetails?.entryPoint || 'placeholder / future integration point'}</div>
         </Card>
       </div>
 
-      <Card className="p-6">
-        <h3 className="text-lg font-bold text-white mb-4">服务控制</h3>
+      <Card className="p-6 space-y-4">
+        <h3 className="text-lg font-bold text-white">运行时与端口信息</h3>
+        <div className="space-y-2 text-sm text-zinc-400">
+          <p>离线资源模式建议：<span className="text-zinc-200">{envStatus.offlineResources?.modeSuggestion || 'online'}</span></p>
+          <p>离线资源缺失：<span className="text-zinc-200">{envStatus.offlineResources?.missingFiles?.join('、') || '无'}</span></p>
+          <p>WSL 诊断建议：<span className="text-zinc-200">{envStatus.wslDetails?.advice?.join('；') || '无'}</span></p>
+          <p>端口检测原始结果：<span className="text-zinc-200 break-all">{envStatus.port18789?.rawOutput || '无'}</span></p>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <button 
             onClick={async () => {
               setIsStartingGateway(true);
-              await executeAction('startGatewayAndOpen');
+              await executeAction('startGateway');
               setIsStartingGateway(false);
             }}
             disabled={isStartingGateway}
@@ -1182,31 +1323,18 @@ export default function App() {
           >
             {isStartingGateway ? <RefreshCw size={24} className="animate-spin" /> : <Play size={24} className="group-hover:scale-110 transition-transform" />}
             <div className="text-left">
-              <span className="block font-bold">启动 Gateway 并打开对话</span>
-              <span className="block text-[10px] opacity-70">一键启动服务并自动在浏览器中打开聊天窗口</span>
+              <span className="block font-bold">启动 Gateway 骨架</span>
+              <span className="block text-[10px] opacity-70">检查入口并尝试以独立进程启动</span>
             </div>
           </button>
-          
           <div className="grid grid-cols-2 gap-4">
-            <button 
-              onClick={async (e) => {
-                const btn = e.currentTarget;
-                btn.disabled = true;
-                await executeAction('setupGateway');
-                btn.disabled = false;
-              }} 
-              className="py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl flex flex-col items-center gap-2 transition-all disabled:opacity-50"
-            >
+            <button onClick={() => executeAction('restartGateway')} className="py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl flex flex-col items-center gap-2 transition-all">
               <RefreshCw size={20} />
               <span className="text-xs font-medium">重启 Gateway</span>
             </button>
-            <button 
-              onClick={refreshStatus} 
-              disabled={isRefreshing}
-              className="py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl flex flex-col items-center gap-2 transition-all disabled:opacity-50"
-            >
-              <RefreshCw size={20} className={isRefreshing ? "animate-spin" : ""} />
-              <span className="text-xs font-medium">刷新状态</span>
+            <button onClick={() => executeAction('killPortProcess', undefined, { port: 18789 })} className="py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl flex flex-col items-center gap-2 transition-all">
+              <Trash2 size={20} />
+              <span className="text-xs font-medium">释放端口 18789</span>
             </button>
           </div>
         </div>
@@ -1215,35 +1343,18 @@ export default function App() {
   );
 
   const renderRepair = () => {
-    const analyzeErrors = () => {
-      const issues = [];
-      if (!envStatus.isAdmin) issues.push({ id: 'admin', msg: '缺少管理员权限', fix: '请右键以管理员身份运行启动器' });
-      if (!envStatus.node?.isOk) issues.push({ id: 'node', msg: 'WSL 内 Node.js 异常', fix: '点击“修复”将尝试在 WSL 内部部署 Node.js 22' });
-      if (envStatus.wsl === 'not_installed') issues.push({ id: 'wsl', msg: 'WSL 功能未开启', fix: '点击“修复”将开启 WSL 并重启电脑' });
-      if (envStatus.runtime === 'not_installed') issues.push({ id: 'runtime', msg: '未检测到 OpenClaw 运行时', fix: '请确保 resources 目录下有 rootfs.tar 文件并点击修复' });
-      
-      // Log based analysis
-      if (logs.includes("Access is denied")) issues.push({ id: 'perm', msg: '文件访问被拒绝', fix: '请检查安装目录权限，建议不要放在 C:\\Program Files' });
-      if (logs.includes("command not found")) issues.push({ id: 'path', msg: '环境变量未生效', fix: '请尝试重启启动器或手动将 Node.js 加入 PATH' });
-      if (logs.includes("Failed to connect to WSL")) issues.push({ id: 'wsl_conn', msg: '无法连接到 WSL 实例', fix: '请在终端运行 wsl --shutdown 后重试' });
-
-      return issues;
-    };
-
-    const issues = analyzeErrors();
-
     return (
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-2xl font-bold text-white">修复与卸载</h2>
-            <p className="text-zinc-400 text-sm mt-1">诊断系统问题并执行深度修复或清理</p>
+            <p className="text-zinc-400 text-sm mt-1">第一批真实诊断规则与可观察修复入口</p>
           </div>
           <button 
-            onClick={handleInstallAll}
+            onClick={runDiagnostics}
             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition-colors font-bold"
           >
-            一键修复全部
+            重新执行诊断
           </button>
         </div>
 
@@ -1253,30 +1364,38 @@ export default function App() {
               <AlertCircle className="text-rose-500" />
               <h3 className="font-bold text-white">智能诊断报告</h3>
             </div>
-            {issues.length > 0 ? (
+            {diagnostics.length > 0 ? (
               <div className="space-y-3">
-                {issues.map((issue, i) => (
-                  <div key={i} className="flex items-start gap-3 p-3 bg-zinc-900/50 rounded-lg border border-zinc-800">
-                    <div className="mt-1 p-1 bg-rose-500/10 text-rose-400 rounded">
-                      <XCircle size={14} />
+                {diagnostics.map((issue) => (
+                  <div key={issue.id} className="flex items-start gap-3 p-3 bg-zinc-900/50 rounded-lg border border-zinc-800">
+                    <div className={cn(
+                      'mt-1 p-1 rounded',
+                      issue.status === 'healthy' ? 'bg-emerald-500/10 text-emerald-400' : issue.status === 'warning' ? 'bg-amber-500/10 text-amber-400' : 'bg-rose-500/10 text-rose-400'
+                    )}>
+                      {issue.status === 'healthy' ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
                     </div>
                     <div className="flex-1">
-                      <h4 className="text-sm font-bold text-zinc-200">{issue.msg}</h4>
-                      <p className="text-xs text-zinc-500 mt-1">建议方案: {issue.fix}</p>
+                      <h4 className="text-sm font-bold text-zinc-200">{issue.title}</h4>
+                      <p className="text-xs text-zinc-400 mt-1">{issue.summary}</p>
+                      <ul className="mt-2 text-[11px] text-zinc-500 list-disc pl-4 space-y-1">
+                        {issue.details.map((detail, index) => <li key={index}>{detail}</li>)}
+                      </ul>
                     </div>
-                    <button 
-                      onClick={() => executeAction(issue.id)}
-                      className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded border border-zinc-700"
-                    >
-                      立即修复
-                    </button>
+                    {issue.repairable && (
+                      <button 
+                        onClick={() => repairDiagnostic(issue.id)}
+                        className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded border border-zinc-700"
+                      >
+                        一键修复
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
             ) : (
               <div className="text-center py-8">
                 <CheckCircle2 size={48} className="text-emerald-500 mx-auto mb-3 opacity-20" />
-                <p className="text-zinc-400">未发现明显环境问题，系统运行良好</p>
+                <p className="text-zinc-400">暂无诊断结果，请点击“重新执行诊断”</p>
               </div>
             )}
           </Card>
@@ -1285,23 +1404,23 @@ export default function App() {
             <Card className="p-4 space-y-4">
               <h3 className="font-bold text-white flex items-center gap-2">
                 <Wrench size={18} className="text-emerald-500" />
-                高级修复工具 (错误代码对策)
+                定向修复工具
               </h3>
               <div className="grid grid-cols-1 gap-2">
-                <button onClick={() => executeAction('fixError', undefined, { errorCode: '0x80070003' })} className="w-full text-left p-3 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-xs text-zinc-300 transition-colors flex justify-between items-center">
-                  <span>修复 0x80070003 (路径/网络异常)</span>
+                <button onClick={() => executeAction('killPortProcess', undefined, { port: 18789 })} className="w-full text-left p-3 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-xs text-zinc-300 transition-colors flex justify-between items-center">
+                  <span>释放 Gateway 默认端口 18789</span>
                   <ChevronRight size={14} className="text-zinc-600" />
                 </button>
-                <button onClick={() => executeAction('fixError', undefined, { errorCode: '0x80370102' })} className="w-full text-left p-3 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-xs text-zinc-300 transition-colors flex justify-between items-center">
-                  <span>修复 0x80370102 (虚拟化未开启)</span>
+                <button onClick={() => executeAction('installNodeOffline')} className="w-full text-left p-3 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-xs text-zinc-300 transition-colors flex justify-between items-center">
+                  <span>Node 离线安装入口（占位）</span>
                   <ChevronRight size={14} className="text-zinc-600" />
                 </button>
-                <button onClick={() => executeAction('fixError', undefined, { errorCode: '0x80040326' })} className="w-full text-left p-3 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-xs text-zinc-300 transition-colors flex justify-between items-center">
-                  <span>修复 0x80040326 (WSL 内核过旧)</span>
+                <button onClick={() => executeAction('repairWSL')} className="w-full text-left p-3 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-xs text-zinc-300 transition-colors flex justify-between items-center">
+                  <span>WSL 修复骨架</span>
                   <ChevronRight size={14} className="text-zinc-600" />
                 </button>
-                <button onClick={() => executeAction('fixError', undefined, { errorCode: 'EACCES' })} className="w-full text-left p-3 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-xs text-zinc-300 transition-colors flex justify-between items-center">
-                  <span>修复 EACCES (文件权限拒绝)</span>
+                <button onClick={() => executeAction('repairOfflineResources')} className="w-full text-left p-3 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-xs text-zinc-300 transition-colors flex justify-between items-center">
+                  <span>离线资源修复建议</span>
                   <ChevronRight size={14} className="text-zinc-600" />
                 </button>
               </div>
@@ -1310,41 +1429,27 @@ export default function App() {
             <Card className="p-4 space-y-4 border-rose-500/30">
               <h3 className="font-bold text-white flex items-center gap-2">
                 <Trash2 size={18} className="text-rose-500" />
-                危险操作 (分步卸载)
+                危险操作 (真实骨架)
               </h3>
               <div className="space-y-2">
                 <button 
-                  onClick={() => askConfirm("确定要停止所有 Gateway 服务吗？", () => executeAction('stopGateway'))}
+                  onClick={() => askConfirm('确定要停止所有 Gateway 服务吗？', () => executeAction('stopGateway'))}
                   className="w-full text-left p-2 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-[10px] text-zinc-400 transition-colors"
                 >
-                  1. 停止 Gateway 运行实例
+                  1. 停止 Gateway 独立进程
                 </button>
                 <button 
-                  onClick={() => askConfirm("确定要注销 WSL 实例吗？这将删除 Linux 内所有数据！", () => executeAction('uninstall'))}
+                  onClick={() => askConfirm('确定要执行深度重置吗？该操作会清理 OpenClaw 运行时目录、WSL 发行版、状态和日志，但保留工作区。', () => executeAction('resetRuntime'))}
                   className="w-full text-left p-2 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-[10px] text-zinc-400 transition-colors"
                 >
-                  2. 注销 OpenClaw-Runtime (WSL)
+                  2. 深度重置运行时（保留工作区）
                 </button>
                 <button 
-                  onClick={() => askConfirm("确定要删除本地配置文件吗？", () => executeAction('deleteConfig'))}
+                  onClick={() => askConfirm('确定要删除本地配置文件吗？', () => executeAction('deleteConfig'))}
                   className="w-full text-left p-2 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-[10px] text-zinc-400 transition-colors"
                 >
                   3. 清理 ~/.openclaw 配置文件
                 </button>
-                <button 
-                  onClick={() => askConfirm("确定要删除运行时二进制文件吗？", () => executeAction('deleteRuntime'))}
-                  className="w-full text-left p-2 bg-zinc-800/50 hover:bg-zinc-800 rounded-lg text-[10px] text-zinc-400 transition-colors"
-                >
-                  4. 移除 runtime 物理目录
-                </button>
-                <div className="pt-2 border-t border-zinc-800">
-                  <button 
-                    onClick={() => askConfirm("警告：深度清理将禁用 WSL 系统功能（需重启）！确定继续吗？", () => executeAction('uninstall', 'thorough'))}
-                    className="w-full text-left p-3 bg-rose-500/10 hover:bg-rose-500/20 rounded-lg text-xs text-rose-400 transition-colors border border-rose-500/20"
-                  >
-                    深度清理 (移除系统级环境)
-                  </button>
-                </div>
               </div>
             </Card>
           </div>
@@ -1358,26 +1463,38 @@ export default function App() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-white">运行日志</h2>
-          <p className="text-zinc-400 text-sm mt-1">实时查看安装与运行过程中的详细信息</p>
+          <p className="text-zinc-400 text-sm mt-1">优先展示真实系统 / PowerShell / Gateway / Diagnostics 日志流</p>
         </div>
-        <button 
-          onClick={async () => {
-            await window.electron.invoke('clear-logs');
-            setLogs('');
-          }}
-          className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
-        >
-          清空显示
-        </button>
+        <div className="flex items-center gap-3">
+          <button 
+            onClick={async () => {
+              const result = await appApi.exportLogs();
+              showNotification(result.result || result.error || '日志导出完成', result.success ? 'success' : 'error');
+            }}
+            className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+          >
+            导出日志
+          </button>
+          <button 
+            onClick={async () => {
+              await appApi.clearLogs();
+              setLogs('');
+            }}
+            className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+          >
+            清空显示
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl p-4 font-mono text-xs overflow-auto custom-scrollbar">
         <div className="space-y-1">
-          {logs.split('\n').map((line, i) => (
+          {logs.split('\n').filter(Boolean).map((line, i) => (
             <div key={i} className={cn(
-              "flex gap-3",
-              line.includes('Error') ? "text-rose-400" : 
-              line.includes('Success') ? "text-emerald-400" : "text-zinc-400"
+              'flex gap-3',
+              line.includes('[ERROR]') ? 'text-rose-400' : 
+              line.includes('[SUCCESS]') ? 'text-emerald-400' :
+              line.includes('[WARN]') ? 'text-amber-400' : 'text-zinc-400'
             )}>
               <span className="text-zinc-600 select-none">[{i + 1}]</span>
               <span>{line}</span>
@@ -1512,22 +1629,22 @@ export default function App() {
             <div className="text-center">
               <RefreshCw size={48} className="mx-auto text-emerald-500 animate-spin mb-4" />
               <h3 className="text-xl font-bold text-white">正在安装 OpenClaw</h3>
-              <p className="text-zinc-400 text-sm mt-2">请勿关闭程序，这可能需要几分钟时间...</p>
+              <p className="text-zinc-400 text-sm mt-2">{envStatus.installWorkflow?.history.at(-1)?.message || '请勿关闭程序，这可能需要几分钟时间...'}</p>
             </div>
             
             <div className="space-y-3">
-              {installSteps.map((step, i) => (
+              {installProgressItems.map((step, i) => (
                 <div key={step.id} className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className={cn(
                       "w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold",
-                      step.check() ? "bg-emerald-500 text-zinc-950" : "bg-zinc-800 text-zinc-500"
+                      step.status === 'completed' ? "bg-emerald-500 text-zinc-950" : "bg-zinc-800 text-zinc-500"
                     )}>
-                      {step.check() ? <CheckCircle2 size={14} /> : i + 1}
+                      {step.status === 'completed' ? <CheckCircle2 size={14} /> : i + 1}
                     </div>
-                    <span className={cn("text-sm", step.check() ? "text-zinc-200" : "text-zinc-500")}>{step.name}</span>
+                    <span className={cn("text-sm", step.status === 'completed' ? "text-zinc-200" : "text-zinc-500")}>{step.label}</span>
                   </div>
-                  {step.check() ? (
+                  {step.status === 'completed' ? (
                     <span className="text-[10px] font-bold text-emerald-500 uppercase">完成</span>
                   ) : (
                     <div className="w-1.5 h-1.5 rounded-full bg-zinc-800 animate-pulse" />
@@ -1541,7 +1658,7 @@ export default function App() {
                 <motion.div 
                   className="bg-emerald-500 h-full"
                   initial={{ width: 0 }}
-                  animate={{ width: `${(installSteps.filter(s => s.check()).length / installSteps.length) * 100}%` }}
+                  animate={{ width: `${workflowProgress}%` }}
                 />
               </div>
             </div>

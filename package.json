@@ -1,31 +1,78 @@
 {
   "name": "openclaw-launcher",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:web": "sh -c 'tsx server.ts & vite --host 0.0.0.0'",
+    "dev:mock-api": "tsx server.ts",
     "build": "vite build",
-    "build:exe": "npm run build && electron-builder",
+    "build:desktop": "npm run build && electron-builder --publish never",
+    "pack:dir": "npm run build && electron-builder --dir --publish never",
+    "dist:win": "npm run build && electron-builder --win portable nsis --x64 --publish never",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip --publish never",
     "preview": "vite preview",
-    "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "clean": "rm -rf dist dist-electron release .mock-data",
+    "typecheck": "tsc --noEmit",
+    "lint": "npm run typecheck"
   },
   "build": {
     "appId": "com.openclaw.launcher",
     "productName": "OpenClaw Launcher",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build-resources"
     },
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "package.json"
+      "package.json",
+      "README.md"
     ],
+    "extraResources": [
+      {
+        "from": "offline_resources",
+        "to": "offline_resources",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "win": {
-      "target": "portable",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "requestedExecutionLevel": "requireAdministrator"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-windows-${arch}-portable.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-${version}-windows-${arch}-setup.${ext}"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
     }
   },
   "dependencies": {
@@ -58,5 +105,6 @@
     "vite": "^6.2.0",
     "vite-plugin-electron": "^0.29.1",
     "vite-plugin-electron-renderer": "^0.14.6"
-  }
+  },
+  "description": "OpenClaw Launcher desktop shell for Windows runtime setup and configuration."
 }

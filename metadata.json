@@ -1,5 +1,5 @@
 {
   "name": "OpenClaw Launcher",
-  "description": "OpenClaw 官方启动器 - 提供一键式 WSL 环境部署与修复功能",
+  "description": "OpenClaw 官方桌面启动器，提供 WSL Runtime 安装、配置与日志能力",
   "requestFramePermissions": []
 }

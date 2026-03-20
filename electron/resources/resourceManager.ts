@@ -5,6 +5,7 @@ import {CacheManager} from './cacheManager';
 import {ManifestResolver} from './manifestResolver';
 import type {
   ManifestLoadOptions,
+  ResourceAvailability,
   ResourceBundle,
   ResourceDefinition,
   ResourceManifest,
@@ -91,15 +92,15 @@ export class ResourceManager {
   async getMissingResources(resources: ResourceDefinition[]) {
     const missing: ResourceDefinition[] = [];
     for (const resource of resources) {
-      const verification = await this.ensureResourceAvailable(resource);
-      if (!verification.exists || !verification.valid) missing.push(resource);
+      const availability = await this.getResourceAvailability(resource);
+      if (!availability.available || !availability.valid) missing.push(resource);
     }
     await this.logService.info(`Detected ${missing.length} missing/invalid resource(s)`, 'resources');
     return missing;
   }
 
   async assessResourceReuse(resource: ResourceDefinition) {
-    const verification = await this.ensureResourceAvailable(resource);
+    const verification = (await this.getResourceAvailability(resource)).verification;
     if (verification.exists && verification.valid) {
       return {resourceId: resource.id, reusable: true, mustRedownload: false, reason: 'valid-cache'};
     }
@@ -111,10 +112,48 @@ export class ResourceManager {
   }
 
   async verifyLocalResources(resources: ResourceDefinition[]): Promise<ResourceVerificationResult[]> {
-    const results = await Promise.all(resources.map((resource) => this.ensureResourceAvailable(resource)));
+    const results = await Promise.all(resources.map(async (resource) => (await this.getResourceAvailability(resource)).verification));
     const validCount = results.filter((item) => item.valid).length;
     await this.logService.info(`Verified local resources: ${validCount}/${results.length} valid`, 'resources');
     return results;
+  }
+
+  async getAvailabilityForResources(resources: ResourceDefinition[]): Promise<ResourceAvailability[]> {
+    return Promise.all(resources.map((resource) => this.getResourceAvailability(resource)));
+  }
+
+  async getManifestAvailabilitySummary(options: ManifestLoadOptions = {}) {
+    const manifest = await this.loadManifest(options);
+    const availability = await this.getAvailabilityForResources(manifest.resources ?? []);
+    const importableResources = availability.filter((item) => item.importable).map((item) => item.resourceId);
+    const rootfsAvailability = availability.filter((item) => {
+      const resource = this.resourceIndex.get(item.resourceId);
+      return resource?.resourceType === 'rootfs';
+    });
+    const checksumAvailability = availability.filter((item) => {
+      const resource = this.resourceIndex.get(item.resourceId);
+      return resource?.resourceType === 'checksum';
+    });
+
+    await this.logService.info(`top-level offline manifest detected: ${manifest.productVersion}`, 'resources');
+    await this.logService.info(`normalized resources count: ${manifest.resources.length}`, 'resources');
+    await this.logService.info(`resource ids: ${manifest.resources.map((resource) => resource.id).join(', ') || '(none)'}`, 'resources');
+    await this.logService.info(`runtime importable resources count: ${importableResources.length}`, 'resources');
+
+    for (const item of [...rootfsAvailability, ...checksumAvailability]) {
+      const resource = this.resourceIndex.get(item.resourceId);
+      await this.logService.info(`${resource?.resourceType ?? 'resource'} candidates checked: ${item.checkedCandidates.join(' | ') || '(none)'}`, 'resources');
+      await this.logService.info(`${resource?.resourceType ?? 'resource'} resolved path: ${item.resolvedPath ?? '(none)'}`, 'resources');
+      await this.logService.info(`${resource?.resourceType ?? 'resource'} available/importable: ${item.available}/${item.importable}`, 'resources');
+    }
+
+    return {
+      manifest,
+      availability,
+      importableResources,
+      rootfsAvailability,
+      checksumAvailability,
+    };
   }
 
   getResourcePath(resource: ResourceDefinition) {
@@ -139,14 +178,61 @@ export class ResourceManager {
       return cachedVerification;
     }
 
-    const localPath = await this.resolveLocalResourcePath(resource);
-    if (!localPath) {
+    const localResolution = await this.resolveLocalResourcePath(resource);
+    if (!localResolution) {
       return cachedVerification;
     }
 
-    await this.logService.info(`Using filesystem-backed local resource for ${resource.id}: ${localPath}`, 'resources');
-    await this.cacheManager.putCachedFile(resource, localPath);
+    await this.logService.info(`Using filesystem-backed local resource for ${resource.id}: ${localResolution.path}`, 'resources');
+    await this.cacheManager.putCachedFile(resource, localResolution.path);
     return this.cacheManager.verifyCachedFile(resource);
+  }
+
+  private async getResourceAvailability(resource: ResourceDefinition): Promise<ResourceAvailability> {
+    const cachedVerification = await this.cacheManager.verifyCachedFile(resource);
+    if (cachedVerification.exists && cachedVerification.valid) {
+      return {
+        resourceId: resource.id,
+        available: true,
+        importable: true,
+        valid: true,
+        resolvedPath: cachedVerification.path ?? null,
+        sourceKind: 'cache',
+        checkedCandidates: cachedVerification.path ? [cachedVerification.path] : [],
+        fallbackUsed: false,
+        verification: cachedVerification,
+      };
+    }
+
+    const localResolution = await this.resolveLocalResourcePath(resource);
+    if (!localResolution) {
+      return {
+        resourceId: resource.id,
+        available: false,
+        importable: false,
+        valid: false,
+        resolvedPath: null,
+        sourceKind: 'unresolved',
+        checkedCandidates: this.buildLocalResourceCandidates(resource).map((candidate) => candidate.path),
+        fallbackUsed: false,
+        verification: cachedVerification,
+      };
+    }
+
+    await this.logService.info(`Using filesystem-backed local resource for ${resource.id}: ${localResolution.path} (${localResolution.sourceKind})`, 'resources');
+    await this.cacheManager.putCachedFile(resource, localResolution.path);
+    const verification = await this.cacheManager.verifyCachedFile(resource);
+    return {
+      resourceId: resource.id,
+      available: verification.exists,
+      importable: true,
+      valid: verification.valid,
+      resolvedPath: localResolution.path,
+      sourceKind: localResolution.sourceKind,
+      checkedCandidates: localResolution.checkedCandidates,
+      fallbackUsed: localResolution.fallbackUsed,
+      verification,
+    };
   }
 
   private findBundle(manifest: ResourceManifest, request: ResourceResolveRequest): ResourceBundle | null {
@@ -155,28 +241,42 @@ export class ResourceManager {
   }
 
   private async resolveLocalResourcePath(resource: ResourceDefinition) {
-    const candidates = [
-      this.getResourcePath(resource),
-      path.join(this.resourceRoot, resource.filename),
-      ...((resource.sources ?? [])
-        .filter((source) => source.type === 'local-import')
-        .flatMap((source) => {
-          const sourcePath = source.path?.trim();
-          if (!sourcePath) return [];
-          return [
-            path.isAbsolute(sourcePath) ? sourcePath : path.resolve(process.cwd(), sourcePath),
-            path.resolve(this.resourceRoot, sourcePath),
-            path.resolve(path.dirname(this.resourceRoot), sourcePath),
-          ];
-        })),
-    ];
+    const candidates = this.buildLocalResourceCandidates(resource);
+    const checkedCandidates: string[] = [];
 
-    for (const candidate of [...new Set(candidates)]) {
-      if (await fs.pathExists(candidate)) {
-        return candidate;
+    for (const candidate of candidates) {
+      checkedCandidates.push(candidate.path);
+      if (await fs.pathExists(candidate.path)) {
+        return {
+          path: candidate.path,
+          sourceKind: candidate.sourceKind,
+          fallbackUsed: candidate.sourceKind === 'filename-fallback' || candidate.sourceKind === 'legacy-root-fallback',
+          checkedCandidates,
+        };
       }
     }
 
     return null;
+  }
+
+  private buildLocalResourceCandidates(resource: ResourceDefinition) {
+    const sourceCandidates = (resource.sources ?? [])
+      .filter((source) => source.type === 'local-import')
+      .flatMap((source) => {
+        const sourcePath = source.path?.trim();
+        if (!sourcePath) return [];
+        return [
+          {path: path.isAbsolute(sourcePath) ? sourcePath : path.resolve(process.cwd(), sourcePath), sourceKind: 'source-path' as const},
+          {path: path.resolve(this.resourceRoot, sourcePath), sourceKind: 'source-path' as const},
+          {path: path.resolve(path.dirname(this.resourceRoot), sourcePath), sourceKind: 'source-path' as const},
+        ];
+      });
+
+    return [
+      {path: this.getResourcePath(resource), sourceKind: 'relativePath' as const},
+      {path: path.join(this.resourceRoot, resource.filename), sourceKind: 'filename-fallback' as const},
+      ...sourceCandidates,
+      {path: path.join(this.resourceRoot, path.basename(resource.relativePath || resource.filename)), sourceKind: 'legacy-root-fallback' as const},
+    ].filter((candidate, index, all) => all.findIndex((item) => item.path === candidate.path) === index);
   }
 }

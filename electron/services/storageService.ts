@@ -43,8 +43,17 @@ export class StorageService {
   }
 
   async writeState(state: Record<string, any>) {
-    await this.atomicWriteJson(this.stateFile, state);
-    return {success: true};
+    try {
+      await this.atomicWriteJson(this.stateFile, state);
+      return {success: true};
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.logService?.warn(
+        `State persistence failed on Windows, but the operation result is still available in memory. Reason: ${message}`,
+        'system',
+      );
+      return {success: false, error: message, degraded: true};
+    }
   }
 
   private async readJsonFile<T>(
@@ -81,16 +90,20 @@ export class StorageService {
     await fs.ensureDir(path.dirname(filePath));
     const serialized = `${JSON.stringify(value, null, 2)}\n`;
     const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    await this.cleanupTempFiles(filePath);
     const handle = await openFile(tempPath, 'w');
 
     try {
+      await this.logService?.info(`Persistence tmp file path: ${tempPath}`, 'system');
+      await this.logService?.info(`Persistence target file path: ${filePath}`, 'system');
       await handle.writeFile(serialized, 'utf8');
       await handle.sync();
     } finally {
       await handle.close();
     }
 
-    await fs.move(tempPath, filePath, {overwrite: true});
+    await this.replaceFileWithRetries(tempPath, filePath);
+    await this.logService?.success(`Persistence success for ${filePath}`, 'system');
   }
 
   private async backupCorruptFile(filePath: string) {
@@ -114,5 +127,41 @@ export class StorageService {
     });
 
     return output;
+  }
+
+  private async replaceFileWithRetries(tempPath: string, targetPath: string) {
+    const maxAttempts = process.platform === 'win32' ? 5 : 2;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await this.logService?.info(`Persistence rename retries: attempt ${attempt}/${maxAttempts}`, 'system');
+        await fs.move(tempPath, targetPath, {overwrite: true});
+        return;
+      } catch (error) {
+        lastError = error;
+        const code = error && typeof error === 'object' && 'code' in error ? String((error as {code?: unknown}).code ?? '') : '';
+        if (process.platform === 'win32' && ['EPERM', 'EBUSY', 'EACCES'].includes(code)) {
+          await this.logService?.warn(`Persistence rename failed with ${code}; retrying replace flow for ${targetPath}.`, 'system');
+          await fs.remove(targetPath).catch(() => undefined);
+          await new Promise((resolve) => setTimeout(resolve, attempt * 50));
+          continue;
+        }
+        break;
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private async cleanupTempFiles(filePath: string) {
+    const directory = path.dirname(filePath);
+    const base = path.basename(filePath);
+    const entries = await fs.readdir(directory).catch(() => []);
+    await Promise.all(
+      entries
+        .filter((entry) => entry.startsWith(`${base}.`) && entry.endsWith('.tmp'))
+        .map((entry) => fs.remove(path.join(directory, entry)).catch(() => undefined)),
+    );
   }
 }

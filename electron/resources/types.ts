@@ -108,6 +108,18 @@ export interface ResourceVerificationResult {
   reason?: string;
 }
 
+export interface ResourceAvailability {
+  resourceId: string;
+  available: boolean;
+  importable: boolean;
+  valid: boolean;
+  resolvedPath: string | null;
+  sourceKind: 'cache' | 'relativePath' | 'filename-fallback' | 'source-path' | 'legacy-root-fallback' | 'unresolved';
+  checkedCandidates: string[];
+  fallbackUsed: boolean;
+  verification: ResourceVerificationResult;
+}
+
 export interface ResourceResolveRequest {
   mode: InstallModeTag;
   platform: SupportedPlatform;

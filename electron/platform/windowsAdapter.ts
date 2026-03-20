@@ -1,6 +1,6 @@
 import fs from 'fs-extra';
 import path from 'node:path';
-import type {InstallModeTag, ResourceDefinition, ResourceManifest} from '../resources/types';
+import type {InstallModeTag, ResourceAvailability, ResourceDefinition, ResourceManifest} from '../resources/types';
 import {
   BasePlatformAdapter,
   type CompatibilityClassification,
@@ -95,6 +95,7 @@ export class WindowsAdapter extends BasePlatformAdapter {
       ? context.preferredMode
       : compatibility.recommendedModes[0] ?? 'core';
     const resolved = await context.resourceManager.resolveResources({mode, platform: 'windows', arch: environment.platformInfo.arch});
+    const availability = await context.resourceManager.getAvailabilityForResources(resolved.resources);
     await this.logService.info(`InstallPlan resources: ${resolved.resources.length}`, 'platform');
     await this.logService.info(`Resource IDs: ${resolved.resources.map((resource) => resource.id).join(', ') || '(none)'}`, 'platform');
     if (resolved.resources.length === 0) {
@@ -115,7 +116,7 @@ export class WindowsAdapter extends BasePlatformAdapter {
     const existingAndValid: string[] = [];
     const existingButInvalid: string[] = [];
     const missing: string[] = [];
-    const runtimeState = await this.inspectRuntimeState(nodeResource, runtimeResource, rootfsResource, gatewayResource);
+    const runtimeState = await this.inspectRuntimeState(nodeResource, runtimeResource, rootfsResource, gatewayResource, availability);
 
     if (runtimeState.node.exists) {
       if (runtimeState.node.valid) {
@@ -156,6 +157,7 @@ export class WindowsAdapter extends BasePlatformAdapter {
         warnings.push('WSL is available, but no installed distro was found yet.');
       }
       if (!runtimeState.wsl.defaultDistroConfigured) warnings.push('WSL default distro is not configured yet.');
+      if (runtimeState.wsl.distroUnknown) warnings.push('WSL distro detection degraded; runtime existence will be confirmed during validate/import.');
     } else {
       missing.push(this.componentWsl);
       if (!environment.supported) {
@@ -240,6 +242,17 @@ export class WindowsAdapter extends BasePlatformAdapter {
         },
       ],
     };
+
+    await this.logService.info(`install plan system prerequisites: ${JSON.stringify({node: runtimeState.node, wsl: runtimeState.wsl})}`, 'platform');
+    await this.logService.info(`install plan reusable components: ${reusableComponents.join(', ') || '(none)'}`, 'platform');
+    await this.logService.info(`install plan repairable components: ${repairableComponents.join(', ') || '(none)'}`, 'platform');
+    await this.logService.info(`install plan missing components: ${missing.join(', ') || '(none)'}`, 'platform');
+    await this.logService.info(`install plan blockers: ${blockers.join(' | ') || '(none)'}`, 'platform');
+    await this.logService.info(`install plan warnings: ${warnings.join(' | ') || '(none)'}`, 'platform');
+    await this.logService.info(
+      `install plan action: ${blockers.length > 0 ? 'blocked' : runtimeState.runtime.exists ? 'reuse/validate' : runtimeState.runtime.importable ? 'import runtime' : 'fresh install'}`,
+      'platform',
+    );
 
     this.setPreparedInstallState({context, manifest, resolved, plan});
     return plan;
@@ -637,6 +650,7 @@ export class WindowsAdapter extends BasePlatformAdapter {
     runtimeResource: ResourceDefinition | undefined,
     rootfsResource: ResourceDefinition | undefined,
     gatewayResource: ResourceDefinition | undefined,
+    availability: ResourceAvailability[],
   ) {
     const distroName = this.options.distroName ?? 'OpenClaw-Runtime';
     const systemNode = await this.commandService.runCommand('node', ['-v'], {source: 'platform', timeoutMs: 5000});
@@ -646,13 +660,16 @@ export class WindowsAdapter extends BasePlatformAdapter {
     const gatewayDir = path.join(this.options.paths.runtimeRoot, 'gateway');
     const runtimeDirExists = await fs.pathExists(runtimeDir);
     const gatewayDirExists = await fs.pathExists(gatewayDir);
-    const distroList = await this.commandService.runCommand('wsl.exe', ['-l', '-v'], {source: 'platform', timeoutMs: 15000});
-    const distroLines = distroList.success ? distroList.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [];
-    const distroExists = distroLines.some((line) => line.includes(distroName));
-    const defaultDistroConfigured = distroLines.some((line) => line.startsWith('*'));
-    const rootfsAvailable = await this.hasLocalResourcePayload(rootfsResource);
-    const runtimePayloadAvailable = await this.hasLocalResourcePayload(runtimeResource) || rootfsAvailable;
-    const gatewayPayloadAvailable = await this.hasLocalResourcePayload(gatewayResource);
+    const distroDetection = await this.detectWslDistroState(distroName);
+    const availabilityMap = new Map(availability.map((item) => [item.resourceId, item]));
+    const rootfsAvailable = rootfsResource ? Boolean(availabilityMap.get(rootfsResource.id)?.importable) : false;
+    const runtimePayloadAvailable = (runtimeResource ? Boolean(availabilityMap.get(runtimeResource.id)?.importable) : false) || rootfsAvailable;
+    const gatewayPayloadAvailable = gatewayResource ? Boolean(availabilityMap.get(gatewayResource.id)?.importable) : false;
+    await this.logService.info(`WSL available: ${distroDetection.statusAvailable}`, 'platform');
+    await this.logService.info(`distro detection command used: ${distroDetection.commandUsed}`, 'platform');
+    await this.logService.info(`distro detection fallback used: ${distroDetection.fallbackUsed}`, 'platform');
+    await this.logService.info(`distro detection parse result: ${distroDetection.distroList.map((item) => item.name).join(', ') || '(none)'}`, 'platform');
+    await this.logService.info(`existing runtime detected: ${distroDetection.distroExists || runtimeDirExists}`, 'platform');
 
     return {
       node: {
@@ -662,16 +679,17 @@ export class WindowsAdapter extends BasePlatformAdapter {
         payloadAvailable: Boolean(nodeResource),
       },
       wsl: {
-        exists: distroList.success,
-        valid: distroList.success,
-        detail: distroList.success ? 'WSL command available.' : (distroList.stderr || distroList.stdout || 'WSL command unavailable'),
-        defaultDistroConfigured,
-        hasAnyDistro: distroLines.length > 0,
+        exists: distroDetection.statusAvailable,
+        valid: distroDetection.statusAvailable,
+        detail: distroDetection.statusAvailable ? 'WSL status command succeeded.' : distroDetection.statusDetail,
+        defaultDistroConfigured: distroDetection.defaultDistroConfigured,
+        hasAnyDistro: distroDetection.distroList.length > 0,
+        distroUnknown: distroDetection.enumerationStatus === 'unknown',
       },
       runtime: {
-        exists: distroExists || runtimeDirExists,
-        valid: distroExists || runtimeDirExists,
-        detail: distroExists ? `WSL distro ${distroName} detected.` : runtimeDirExists ? `Runtime directory detected at ${runtimeDir}.` : 'Runtime not detected.',
+        exists: distroDetection.distroExists || runtimeDirExists,
+        valid: distroDetection.distroExists || runtimeDirExists,
+        detail: distroDetection.distroExists ? `WSL distro ${distroName} detected.` : runtimeDirExists ? `Runtime directory detected at ${runtimeDir}.` : 'Runtime not detected.',
         payloadAvailable: runtimePayloadAvailable,
         importable: runtimePayloadAvailable,
       },
@@ -688,11 +706,58 @@ export class WindowsAdapter extends BasePlatformAdapter {
     return match?.[1] ?? null;
   }
 
-  private async hasLocalResourcePayload(resource: ResourceDefinition | undefined) {
-    if (!resource) return false;
-    const prepared = this.getPreparedInstallState();
-    const cached = prepared ? await prepared.context.cacheManager.getCachedFile(resource) : null;
-    if (cached && await fs.pathExists(cached)) return true;
-    return fs.pathExists(path.join(this.options.paths.offlineResourcesRoot, resource.relativePath));
+  private async detectWslDistroState(distroName: string) {
+    const statusResult = await this.commandService.runCommand('wsl.exe', ['--status'], {source: 'platform', timeoutMs: 15000});
+    const commands: Array<{args: string[]; label: string}> = [
+      {args: ['-l', '-v'], label: 'wsl -l -v'},
+      {args: ['-l'], label: 'wsl -l'},
+      {args: ['--list', '--quiet'], label: 'wsl --list --quiet'},
+    ];
+
+    for (let index = 0; index < commands.length; index += 1) {
+      const command = commands[index]!;
+      const result = await this.commandService.runCommand('wsl.exe', command.args, {source: 'platform', timeoutMs: 15000});
+      const rawOutput = `${result.stdout}${result.stderr}`.trim();
+      const distroList = rawOutput
+        .split(/\r?\n/)
+        .map((line) => line.replace(/\u0000/g, '').trim())
+        .filter((line) => line && !/^NAME/i.test(line))
+        .map((line) => {
+          const isDefault = line.startsWith('*');
+          const cleaned = line.replace(/^\*/, '').trim();
+          const parts = cleaned.split(/\s{2,}/).filter(Boolean);
+          return {
+            name: parts[0] ?? cleaned,
+            state: parts[1],
+            version: parts[2],
+            isDefault,
+          };
+        })
+        .filter((item) => item.name);
+
+      if (result.success || distroList.length > 0) {
+        return {
+          statusAvailable: statusResult.success,
+          statusDetail: statusResult.stderr || statusResult.stdout || 'WSL status unavailable',
+          enumerationStatus: 'ok' as const,
+          commandUsed: command.label,
+          fallbackUsed: index > 0,
+          distroList,
+          distroExists: distroList.some((item) => item.name === distroName),
+          defaultDistroConfigured: distroList.some((item) => item.isDefault),
+        };
+      }
+    }
+
+    return {
+      statusAvailable: statusResult.success,
+      statusDetail: statusResult.stderr || statusResult.stdout || 'WSL status unavailable',
+      enumerationStatus: 'unknown' as const,
+      commandUsed: commands.at(-1)?.label ?? 'none',
+      fallbackUsed: true,
+      distroList: [],
+      distroExists: false,
+      defaultDistroConfigured: false,
+    };
   }
 }

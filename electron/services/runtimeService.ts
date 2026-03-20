@@ -243,32 +243,19 @@ export class RuntimeService {
       };
     }
 
-    const [statusResult, listResult] = await Promise.all([
-      this.commandService.runCommand('wsl.exe', ['--status'], {source: 'diagnostics', timeoutMs: 15000}),
-      this.commandService.runCommand('wsl.exe', ['-l', '-v'], {source: 'diagnostics', timeoutMs: 15000}),
-    ]);
-
+    const statusResult = await this.commandService.runCommand('wsl.exe', ['--status'], {source: 'diagnostics', timeoutMs: 15000});
     const rawStatus = `${statusResult.stdout}${statusResult.stderr}`.trim();
-    const rawList = `${listResult.stdout}${listResult.stderr}`.trim();
-    const distroList = rawList
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line && !/^NAME/i.test(line))
-      .map((line) => {
-        const isDefault = line.startsWith('*');
-        const cleaned = line.replace(/^\*/, '').trim();
-        const parts = cleaned.split(/\s{2,}/).filter(Boolean);
-        return {
-          name: parts[0] ?? cleaned,
-          state: parts[1],
-          version: parts[2],
-          isDefault,
-        };
-      });
+    const distroDetection = await this.detectWslDistroList('diagnostics');
+    const rawList = distroDetection.rawOutput;
+    const distroList = distroDetection.distroList;
+    await this.logService.info(`WSL available: ${statusResult.success}`, 'diagnostics');
+    await this.logService.info(`distro detection command used: ${distroDetection.commandUsed}`, 'diagnostics');
+    await this.logService.info(`distro detection fallback used: ${distroDetection.fallbackUsed}`, 'diagnostics');
+    await this.logService.info(`distro detection parse result: ${distroList.map((item) => item.name).join(', ') || '(none)'}`, 'diagnostics');
 
     const defaultDistro = distroList.find((item) => item.isDefault)?.name ?? null;
     const openClawDistroInstalled = distroList.some((item) => item.name === OPENCLAW_DISTRO_NAME);
-    const installed = statusResult.success || distroList.length > 0;
+    const installed = statusResult.success;
     const advice: string[] = [];
 
     if (!installed) {
@@ -276,6 +263,11 @@ export class RuntimeService {
       advice.push('建议以管理员身份执行 wsl --install，或在控制面板中启用 WSL 和虚拟机平台。');
     } else {
       advice.push(defaultDistro ? `当前默认发行版为 ${defaultDistro}。` : 'WSL 已启用，但尚未发现默认发行版。');
+      if (distroDetection.status === 'unknown') {
+        advice.push('WSL 发行版枚举失败，当前仅确认 WSL 可用，发行版状态未知。');
+      } else if (distroList.length === 0) {
+        advice.push('WSL 可用，但当前尚未安装任何发行版。');
+      }
       if (!openClawDistroInstalled) {
         advice.push(`尚未发现 ${OPENCLAW_DISTRO_NAME} 发行版，后续可导入 OpenClaw rootfs。`);
       }
@@ -298,18 +290,12 @@ export class RuntimeService {
     await this.logService.info(`Scanning offline resources at ${this.offlineResourcesDir}`, 'diagnostics');
     const exists = await fs.pathExists(this.offlineResourcesDir);
     const manifestPath = path.join(this.offlineResourcesDir, 'manifest.json');
-    const expected = [
-      {label: 'WSL 包', patterns: [/wsl/i, /msixbundle$/i, /msi$/i]},
-      {label: 'Node 离线包', patterns: [/node/i, /zip$/i, /msi$/i, /exe$/i]},
-      {label: 'rootfs / 镜像包', patterns: [/rootfs/i, /image/i, /tar$/i, /tar\.gz$/i]},
-      {label: '校验文件', patterns: [/sha256/i, /checksum/i, /manifest/i]},
-    ];
 
     if (!exists) {
       return {
         exists: false,
         basePath: this.offlineResourcesDir,
-        missingFiles: expected.map((item) => item.label),
+        missingFiles: ['WSL 包', 'Node 离线包', 'rootfs / 镜像包', '校验文件'],
         invalidFiles: [],
         detectedFiles: [],
         modeSuggestion: 'online',
@@ -324,28 +310,37 @@ export class RuntimeService {
     const manifestExists = await fs.pathExists(manifestPath);
     const importedManifests = await this.localImportManager.scanImportDirectory().catch(() => []);
     const cachedResources = await this.cacheManager.listCachedResources().catch(() => []);
-    const missingFiles = expected
-      .filter((item) => !fileNames.some((file) => item.patterns.some((pattern) => pattern.test(file))))
-      .map((item) => item.label);
-
     const invalidFiles = fileNames.filter((file) => /\.(tmp|partial)$/i.test(file));
-    const advice = missingFiles.length === 0 && invalidFiles.length === 0
-      ? ['离线资源完整，可优先使用 offline 模式。']
-      : [
-          missingFiles.length > 0 ? `缺失资源：${missingFiles.join('、')}` : '关键离线资源已存在。',
-          invalidFiles.length > 0 ? `发现可疑文件：${invalidFiles.join('、')}` : '未发现临时损坏文件。',
-          '若暂时无法补齐，建议切换 online 模式。',
-        ];
+    const advice: string[] = [];
+    const missingFiles: string[] = [];
 
     if (manifestExists) {
-      const manifest = await this.resourceManager.loadManifest({localPath: manifestPath}).catch(() => null);
-      if (manifest) {
-        advice.push(`已检测到资源 manifest，共 ${manifest.resources.length} 个资源定义。`);
+      const summary = await this.resourceManager.getManifestAvailabilitySummary({localPath: manifestPath}).catch(() => null);
+      if (summary) {
+        advice.push(`已检测到资源 manifest，共 ${summary.manifest.resources.length} 个资源定义。`);
+        const hasNode = summary.availability.some((item) => summary.manifest.resources.find((resource) => resource.id === item.resourceId)?.resourceType === 'node' && item.importable);
+        const hasRootfs = summary.rootfsAvailability.some((item) => item.importable);
+        const hasChecksum = summary.checksumAvailability.some((item) => item.importable);
+        const hasWslBundle = summary.availability.some((item) => summary.manifest.resources.find((resource) => resource.id === item.resourceId)?.resourceType === 'repair-bundle' && item.importable);
+        if (!hasWslBundle) missingFiles.push('WSL 包');
+        if (!hasNode) missingFiles.push('Node 离线包');
+        if (!hasRootfs) missingFiles.push('rootfs / 镜像包');
+        if (!hasChecksum) missingFiles.push('校验文件');
+        advice.push(`runtime importable resources count: ${summary.importableResources.length}`);
+        advice.push(`rootfs available: ${hasRootfs ? 'yes' : 'no'}`);
+        advice.push(`checksum available: ${hasChecksum ? 'yes' : 'no'}`);
       }
     } else {
       advice.push('尚未检测到跨平台资源 manifest.json。');
+      missingFiles.push('WSL 包', 'Node 离线包', 'rootfs / 镜像包', '校验文件');
     }
 
+    if (missingFiles.length === 0 && invalidFiles.length === 0) advice.unshift('离线资源完整，可优先使用 offline 模式。');
+    else {
+      advice.unshift(invalidFiles.length > 0 ? `发现可疑文件：${invalidFiles.join('、')}` : '未发现临时损坏文件。');
+      advice.unshift(missingFiles.length > 0 ? `缺失资源：${missingFiles.join('、')}` : '关键离线资源已存在。');
+      advice.push('若暂时无法补齐，建议切换 online 模式。');
+    }
     advice.push(`本地导入目录 manifest 数量: ${importedManifests.length}`);
     advice.push(`资源缓存条目数量: ${cachedResources.length}`);
 
@@ -357,6 +352,55 @@ export class RuntimeService {
       detectedFiles: fileNames,
       modeSuggestion: missingFiles.length === 0 && invalidFiles.length === 0 ? 'offline' : 'online',
       advice,
+    };
+  }
+
+  private async detectWslDistroList(source: 'diagnostics' | 'platform') {
+    const commands: Array<{args: string[]; label: string}> = [
+      {args: ['-l', '-v'], label: 'wsl -l -v'},
+      {args: ['-l'], label: 'wsl -l'},
+      {args: ['--list', '--quiet'], label: 'wsl --list --quiet'},
+    ];
+
+    for (let index = 0; index < commands.length; index += 1) {
+      const command = commands[index]!;
+      const result = await this.commandService.runCommand('wsl.exe', command.args, {source, timeoutMs: 15000});
+      const rawOutput = `${result.stdout}${result.stderr}`.trim();
+      if (!result.success && !rawOutput) continue;
+      const distroList = rawOutput
+        .split(/\r?\n/)
+        .map((line) => line.replace(/\u0000/g, '').trim())
+        .filter((line) => line && !/^NAME/i.test(line))
+        .map((line) => {
+          const isDefault = line.startsWith('*');
+          const cleaned = line.replace(/^\*/, '').trim();
+          const parts = cleaned.split(/\s{2,}/).filter(Boolean);
+          return {
+            name: parts[0] ?? cleaned,
+            state: parts[1],
+            version: parts[2],
+            isDefault,
+          };
+        })
+        .filter((item) => item.name);
+
+      if (result.success || distroList.length > 0) {
+        return {
+          status: 'ok' as const,
+          commandUsed: command.label,
+          fallbackUsed: index > 0,
+          rawOutput,
+          distroList,
+        };
+      }
+    }
+
+    return {
+      status: 'unknown' as const,
+      commandUsed: commands.at(-1)?.label ?? 'none',
+      fallbackUsed: true,
+      rawOutput: '',
+      distroList: [],
     };
   }
 

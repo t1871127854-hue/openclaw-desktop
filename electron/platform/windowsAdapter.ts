@@ -17,8 +17,8 @@ import {
 export class WindowsAdapter extends BasePlatformAdapter {
   protected readonly platform = 'windows' as const;
 
-  private readonly componentNode = 'node';
-  private readonly componentWsl = 'wsl';
+  private readonly componentNode = 'system-node';
+  private readonly componentWsl = 'system-wsl';
   private readonly componentRuntime = 'runtime';
   private readonly componentGateway = 'gateway-bundle';
 
@@ -152,9 +152,10 @@ export class WindowsAdapter extends BasePlatformAdapter {
         repairableComponents.push(this.componentWsl);
         warnings.push(`WSL exists but is not fully ready (${runtimeState.wsl.detail}); repair path may be required.`);
       }
-      if (!runtimeState.wsl.defaultDistroConfigured && runtimeState.runtime.exists) {
-        warnings.push('WSL is enabled and OpenClaw-Runtime exists, but no default distro is configured; this remains a warning only.');
+      if (!runtimeState.wsl.hasAnyDistro) {
+        warnings.push('WSL is available, but no installed distro was found yet.');
       }
+      if (!runtimeState.wsl.defaultDistroConfigured) warnings.push('WSL default distro is not configured yet.');
     } else {
       missing.push(this.componentWsl);
       if (!environment.supported) {
@@ -177,10 +178,11 @@ export class WindowsAdapter extends BasePlatformAdapter {
       if (rootfsResource) missingButOptionalResources.push(rootfsResource.id);
     } else {
       missing.push(this.componentRuntime);
-      if (runtimeResource || rootfsResource) {
-        await this.logService.info('Windows install plan: no reusable runtime found; fresh runtime import/install is required.', 'platform');
+      if (runtimeState.runtime.importable) {
+        warnings.push('System prerequisites are ready, but OpenClaw runtime is not installed yet.');
+        await this.logService.info('Windows install plan: WSL is available and runtime is missing; entering runtime import/install path.', 'platform');
       } else {
-        blockers.push('No existing runtime/rootfs was detected and no runtime/rootfs resource is available for fresh install.');
+        blockers.push('WSL is available, but no OpenClaw runtime distro was found and no importable runtime/rootfs resource is available.');
         await this.logService.warn('Windows install plan: blocking because runtime is missing and no runtime/rootfs payload is available.', 'platform');
       }
     }
@@ -301,17 +303,17 @@ export class WindowsAdapter extends BasePlatformAdapter {
     const runtimeReusable = (plan.reusableComponents ?? []).includes(this.componentRuntime);
 
     if (!nodeResource && !systemNodeReusable) {
-      return this.buildInstallFailure(plan, 'Windows install plan is missing required node/runtime resources.', {
+      return this.buildInstallFailure(plan, 'System Node is unavailable, so runtime install cannot continue until Node is installed or provided offline.', {
         executedSteps,
-        missingResources: ['node'],
+        missingResources: [this.componentNode],
         unresolvedDependencies: prepared.resolved.missingDependencies,
       });
     }
 
     if (!(runtimeResource || rootfsResource) && !runtimeReusable) {
-      return this.buildInstallFailure(plan, 'Windows install plan is missing required node/runtime resources.', {
+      return this.buildInstallFailure(plan, 'System prerequisites are ready, but OpenClaw runtime is not installed yet and no importable runtime/rootfs resource was found.', {
         executedSteps,
-        missingResources: ['runtime/rootfs'],
+        missingResources: [this.componentRuntime],
         unresolvedDependencies: prepared.resolved.missingDependencies,
       });
     }
@@ -664,12 +666,14 @@ export class WindowsAdapter extends BasePlatformAdapter {
         valid: distroList.success,
         detail: distroList.success ? 'WSL command available.' : (distroList.stderr || distroList.stdout || 'WSL command unavailable'),
         defaultDistroConfigured,
+        hasAnyDistro: distroLines.length > 0,
       },
       runtime: {
-        exists: distroExists || runtimeDirExists || rootfsAvailable,
+        exists: distroExists || runtimeDirExists,
         valid: distroExists || runtimeDirExists,
-        detail: distroExists ? `WSL distro ${distroName} detected.` : runtimeDirExists ? `Runtime directory detected at ${runtimeDir}.` : rootfsAvailable ? 'Rootfs payload detected for fresh import.' : 'Runtime not detected.',
+        detail: distroExists ? `WSL distro ${distroName} detected.` : runtimeDirExists ? `Runtime directory detected at ${runtimeDir}.` : 'Runtime not detected.',
         payloadAvailable: runtimePayloadAvailable,
+        importable: runtimePayloadAvailable,
       },
       gateway: {
         exists: gatewayDirExists || gatewayPayloadAvailable,

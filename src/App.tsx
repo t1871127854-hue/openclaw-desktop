@@ -501,7 +501,13 @@ export default function App() {
             <span className="text-xs font-medium text-zinc-500 uppercase">Gateway</span>
             <StatusBadge status={envStatus.gateway || 'loading'} />
           </div>
-          <p className="text-sm text-zinc-200">{envStatus.gatewayDetails?.pid ? `PID ${envStatus.gatewayDetails.pid}` : '未启动 / placeholder'}</p>
+          <p className="text-sm text-zinc-200">
+            {envStatus.gatewayDetails?.pid
+              ? `PID ${envStatus.gatewayDetails.pid}`
+              : envStatus.gateway === 'not_configured'
+                ? '运行时已就绪，Gateway 尚未配置'
+                : '未启动 / placeholder'}
+          </p>
         </Card>
         <Card className="p-4 space-y-2">
           <div className="flex items-center justify-between">
@@ -610,8 +616,8 @@ export default function App() {
             <EnvItem 
               icon={Terminal} 
               label="Git (WSL)" 
-              status={envStatus.git?.isOk ? 'installed' : 'error'} 
-              sub={envStatus.git?.version !== 'not_installed' ? `Windows Git 版本: ${envStatus.git?.version}` : 'Windows 未检测到 Git'}
+              status={envStatus.git?.isOk ? 'installed' : 'not_configured'} 
+              sub={envStatus.git?.version !== 'not_installed' ? `Windows Git 版本: ${envStatus.git?.version}` : '未检测到 Git，可稍后安装，不影响当前运行时状态'}
               onFix={() => refreshStatus()}
             />
           </div>
@@ -1333,7 +1339,10 @@ export default function App() {
             <span className="text-xs font-medium text-zinc-500 uppercase">Gateway</span>
             <StatusBadge status={envStatus.gateway || 'loading'} />
           </div>
-          <div className="text-sm text-zinc-300 truncate">{envStatus.gatewayDetails?.entryPoint || 'placeholder / future integration point'}</div>
+          <div className="text-sm text-zinc-300 truncate">
+            {envStatus.gatewayDetails?.entryPoint
+              || (envStatus.gateway === 'not_configured' ? 'Gateway 未配置，可稍后导入 bundle 或指定入口' : 'placeholder / future integration point')}
+          </div>
         </Card>
       </div>
 

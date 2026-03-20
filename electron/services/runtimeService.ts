@@ -145,8 +145,17 @@ export class RuntimeService {
       const git = await this.detectGitVersion();
       const configExists = await fs.pathExists(this.storageService.configFile);
       const skillPackExists = await fs.pathExists(path.join(this.paths.basePath, 'skills-pack.tar.gz'));
-      const rootfsPath = path.join(this.offlineResourcesDir, 'openclaw-rootfs.tar');
-      const rootfsExists = await fs.pathExists(rootfsPath);
+      const rootfsExists = !offlineResources.missingFiles.includes('rootfs / 镜像包');
+      const runtimeReady = wslDetails.openClawDistroInstalled;
+      const degradedButUsable = Boolean(nodeDetails.supported && wslDetails.available && (runtimeReady || rootfsExists) && (!git.isOk || gatewayDetails.placeholder));
+      const mergedGatewayDetails = {
+        ...gatewayDetails,
+        runtimeReady,
+        degradedButUsable: gatewayDetails.degradedButUsable ?? degradedButUsable,
+      };
+      if (!git.isOk) {
+        await this.logService.warn('未检测到 Git，可稍后安装，不影响当前运行时状态。', 'diagnostics');
+      }
 
       return {
         isAdmin,
@@ -157,7 +166,7 @@ export class RuntimeService {
         vmPlatform,
         sandboxFeature,
         runtime: wslDetails.openClawDistroInstalled ? 'installed' : 'not_installed',
-        gateway: gatewayDetails.running ? 'running' : 'stopped',
+        gateway: mergedGatewayDetails.running ? 'running' : mergedGatewayDetails.placeholder ? 'not_configured' : 'stopped',
         configExists,
         skillPackExists,
         localResources: {
@@ -169,7 +178,7 @@ export class RuntimeService {
         wslDetails,
         offlineResources,
         port18789,
-        gatewayDetails,
+        gatewayDetails: mergedGatewayDetails,
         diagnostics,
         installContext,
         installWorkflow: this.installWorkflow,
@@ -969,6 +978,13 @@ export class RuntimeService {
       await this.updateInstallWorkflow('start-gateway', 'running', 'Starting gateway.');
       const gateway = await this.platformAdapter.startGateway();
       if (!gateway.success) {
+        if (this.isDegradedUsableGatewayResult(gateway)) {
+          await this.logService.warn('degraded but usable mode entered', 'gateway');
+          await this.updateInstallWorkflow('start-gateway', 'completed', gateway.error || 'Gateway 未配置，进入临时可用模式。', gateway.details);
+          await this.updateInstallWorkflow('completed', 'completed', '安装完成：运行时已就绪，Gateway 尚未配置，可继续使用配置、修复和日志功能。', {mode, manifestVersion: manifest.productVersion, degradedButUsable: true});
+          await this.clearInstallFailure();
+          return {success: true, result: '安装完成，当前处于临时可用模式。', details: {workflow: this.installWorkflow, installResult, validation, gateway}};
+        }
         await this.updateInstallWorkflow('failed', 'failed', gateway.error || 'Gateway start failed.', gateway.details);
         await this.setInstallFailure('start-gateway', gateway.error || 'Gateway start failed.', gateway.details);
         return gateway;
@@ -1356,7 +1372,15 @@ export class RuntimeService {
 
   private async installViaPlatformAdapter(preferredMode?: any) {
     const plan = await this.createPlatformPlan(preferredMode);
-    return this.platformAdapter.installRuntime(plan);
+    const result = await this.platformAdapter.installRuntime(plan);
+    if (!result.success) return result;
+    return {
+      ...result,
+      details: {
+        ...(result.details ?? {}),
+        status: await this.getStatus(),
+      },
+    };
   }
 
   private async validatePlatformRuntime(preferredMode?: any) {
@@ -1956,9 +1980,16 @@ export class RuntimeService {
   private async detectGitVersion() {
     const result = await this.commandService.runCommand('git', ['--version'], {source: 'diagnostics', timeoutMs: 10000});
     const versionMatch = `${result.stdout}${result.stderr}`.match(/(\d+\.\d+\.\d+)/);
+    if (!result.success) {
+      await this.logService.warn('未检测到 Git，可稍后安装，不影响当前运行时状态。', 'diagnostics');
+    }
     return {
       version: versionMatch?.[1] ?? 'not_installed',
       isOk: result.success,
     };
+  }
+
+  private isDegradedUsableGatewayResult(result: ActionResult) {
+    return Boolean(result.details?.degradedButUsable);
   }
 }

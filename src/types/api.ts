@@ -209,6 +209,11 @@ export interface GatewayStatus {
   entryPoint: string | null;
   commandLine: string | null;
   placeholder: boolean;
+  runtimeReady?: boolean;
+  gatewayBundleReady?: boolean;
+  gatewayEntrypointReady?: boolean;
+  gatewaySpawnable?: boolean;
+  degradedButUsable?: boolean;
   advice: string[];
 }
 

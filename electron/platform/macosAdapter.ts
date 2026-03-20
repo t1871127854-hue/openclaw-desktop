@@ -338,12 +338,36 @@ export class MacOSAdapter extends BasePlatformAdapter {
 
     const gatewayResource = this.findResource(prepared.resolved.resources, 'gateway-bundle');
     if (!gatewayResource) {
-      return {success: false, status: 'implemented', error: 'Gateway bundle is not present in the prepared install state.'};
+      return {
+        success: false,
+        status: 'implemented',
+        error: 'OpenClaw 运行时已就绪，Gateway 启动资源尚未配置。',
+        details: {
+          ...this.getGatewayDetails(),
+          runtimeReady: true,
+          gatewayBundleReady: false,
+          gatewayEntrypointReady: false,
+          gatewaySpawnable: false,
+          degradedButUsable: true,
+        },
+      };
     }
 
     const gatewayEntry = await this.prepareGatewayEntry(gatewayResource);
     if (!gatewayEntry) {
-      return {success: false, status: 'implemented', error: 'Unable to resolve macOS gateway startup entry.'};
+      return {
+        success: false,
+        status: 'implemented',
+        error: '已检测到 Gateway 目录，但未找到可启动入口文件。',
+        details: {
+          ...this.getGatewayDetails(),
+          runtimeReady: true,
+          gatewayBundleReady: true,
+          gatewayEntrypointReady: false,
+          gatewaySpawnable: false,
+          degradedButUsable: true,
+        },
+      };
     }
 
     const child = await this.commandService.startManagedProcess(gatewayEntry.command, gatewayEntry.args, {

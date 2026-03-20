@@ -40,11 +40,15 @@ export class GatewayService {
       entryPoint: this.gatewayEntryPoint,
       commandLine: this.gatewayCommandLine,
       placeholder: !this.gatewayEntryPoint,
+      gatewayBundleReady: Boolean(this.gatewayWorkingDirectory),
+      gatewayEntrypointReady: Boolean(this.gatewayEntryPoint),
+      gatewaySpawnable: Boolean(this.gatewayEntryPoint),
+      degradedButUsable: !this.gatewayEntryPoint,
       advice: this.gatewayEntryPoint
         ? []
         : [
-            '尚未定位到可启动的 Gateway 入口。',
-            '可通过 OPENCLAW_GATEWAY_DIR 指定真实 OpenClaw 工作目录。',
+            'OpenClaw 运行时已就绪，Gateway 启动资源尚未配置。',
+            '可导入 gateway bundle，或通过 OPENCLAW_GATEWAY_DIR 指定真实 OpenClaw 工作目录。',
           ],
     };
   }

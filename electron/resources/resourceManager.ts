@@ -204,6 +204,11 @@ export class ResourceManager {
       };
     }
 
+    if (cachedVerification.exists && !cachedVerification.valid) {
+      await this.logService.warn(`cache invalidated / refreshed: ${resource.id}`, 'resources');
+      await this.cacheManager.invalidateBadCache(resource.id);
+    }
+
     const localResolution = await this.resolveLocalResourcePath(resource);
     if (!localResolution) {
       return {
@@ -260,6 +265,8 @@ export class ResourceManager {
   }
 
   private buildLocalResourceCandidates(resource: ResourceDefinition) {
+    const runtimeFolderCandidate = path.join(this.resourceRoot, 'runtime', resource.filename);
+    const rootFolderCandidate = path.join(this.resourceRoot, resource.filename);
     const sourceCandidates = (resource.sources ?? [])
       .filter((source) => source.type === 'local-import')
       .flatMap((source) => {
@@ -273,8 +280,9 @@ export class ResourceManager {
       });
 
     return [
+      {path: runtimeFolderCandidate, sourceKind: 'filename-fallback' as const},
+      {path: rootFolderCandidate, sourceKind: 'legacy-root-fallback' as const},
       {path: this.getResourcePath(resource), sourceKind: 'relativePath' as const},
-      {path: path.join(this.resourceRoot, resource.filename), sourceKind: 'filename-fallback' as const},
       ...sourceCandidates,
       {path: path.join(this.resourceRoot, path.basename(resource.relativePath || resource.filename)), sourceKind: 'legacy-root-fallback' as const},
     ].filter((candidate, index, all) => all.findIndex((item) => item.path === candidate.path) === index);

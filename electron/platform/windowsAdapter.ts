@@ -444,13 +444,50 @@ export class WindowsAdapter extends BasePlatformAdapter {
 
     const gatewayResource = this.findResource(prepared.resolved.resources, 'gateway-bundle');
     if (!gatewayResource) {
-      return {success: false, status: 'implemented', error: 'Gateway bundle is not present in the prepared install state.'};
+      await this.logService.warn('gateway ready boolean: false (bundle missing)', 'gateway');
+      await this.logService.warn('degraded but usable mode entered', 'gateway');
+      return {
+        success: false,
+        status: 'implemented',
+        error: 'OpenClaw 运行时已就绪，Gateway 启动资源尚未配置。',
+        details: {
+          ...this.getGatewayDetails(),
+          runtimeReady: true,
+          gatewayBundleReady: false,
+          gatewayEntrypointReady: false,
+          gatewaySpawnable: false,
+          degradedButUsable: true,
+          repairItems: ['导入 gateway bundle', '指定 gateway 入口路径'],
+        },
+      };
     }
 
     const gatewayEntry = await this.prepareGatewayEntry(gatewayResource);
     if (!gatewayEntry) {
-      return {success: false, status: 'implemented', error: 'Unable to resolve Windows gateway startup entry.'};
+      const gatewayRoot = this.options.gatewayWorkingDirectory ?? path.join(this.options.paths.runtimeRoot, 'gateway');
+      const gatewayRootExists = await fs.pathExists(gatewayRoot);
+      await this.logService.warn(`gateway bundle resolved path: ${gatewayRoot}`, 'gateway');
+      await this.logService.warn('gateway entrypoint path: (none)', 'gateway');
+      await this.logService.warn('gateway ready boolean: false (entrypoint missing)', 'gateway');
+      return {
+        success: false,
+        status: 'implemented',
+        error: gatewayRootExists ? '已检测到 Gateway 目录，但未找到可启动入口文件。' : 'OpenClaw 运行时已就绪，Gateway 启动资源尚未配置。',
+        details: {
+          ...this.getGatewayDetails(),
+          runtimeReady: true,
+          gatewayBundleReady: gatewayRootExists,
+          gatewayEntrypointReady: false,
+          gatewaySpawnable: false,
+          degradedButUsable: true,
+          repairItems: gatewayRootExists ? ['补齐 Gateway 入口文件', '指定 gateway 入口路径'] : ['导入 gateway bundle', '指定 gateway 入口路径'],
+        },
+      };
     }
+
+    await this.logService.info(`gateway bundle resolved path: ${gatewayEntry.workingDirectory}`, 'gateway');
+    await this.logService.info(`gateway entrypoint path: ${gatewayEntry.entryPoint}`, 'gateway');
+    await this.logService.info('gateway ready boolean: true', 'gateway');
 
     const child = await this.commandService.startManagedProcess(gatewayEntry.command, gatewayEntry.args, {
       cwd: gatewayEntry.workingDirectory,
@@ -465,7 +502,14 @@ export class WindowsAdapter extends BasePlatformAdapter {
       status: 'implemented',
       result: child.pid ? 'Windows gateway started.' : undefined,
       error: child.pid ? undefined : 'Gateway process spawned without a pid.',
-      details: this.getGatewayDetails() as unknown as Record<string, unknown>,
+      details: {
+        ...this.getGatewayDetails(),
+        runtimeReady: true,
+        gatewayBundleReady: true,
+        gatewayEntrypointReady: true,
+        gatewaySpawnable: Boolean(child.pid),
+        degradedButUsable: false,
+      } as unknown as Record<string, unknown>,
     };
   }
 

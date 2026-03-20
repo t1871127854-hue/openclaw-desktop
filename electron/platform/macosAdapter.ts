@@ -17,6 +17,10 @@ import {
 export class MacOSAdapter extends BasePlatformAdapter {
   protected readonly platform = 'macos' as const;
 
+  private readonly componentNode = 'node';
+  private readonly componentRuntime = 'runtime';
+  private readonly componentGateway = 'gateway-bundle';
+
   async detectEnvironment(): Promise<EnvironmentDetection> {
     const platformInfo = await this.getPlatformInfo();
     const blockers: string[] = [];
@@ -99,34 +103,56 @@ export class MacOSAdapter extends BasePlatformAdapter {
     const reusableComponents: string[] = [];
     const repairableComponents: string[] = [];
     const missingButOptionalResources: string[] = [];
-    const systemNode = await this.commandService.runCommand('node', ['-v'], {source: 'platform', timeoutMs: 5000});
-    const runtimeDirExists = await fs.pathExists(path.join(this.options.paths.runtimeRoot, 'runtime'));
-    const gatewayDirExists = await fs.pathExists(path.join(this.options.paths.runtimeRoot, 'gateway'));
+    const existingAndValid: string[] = [];
+    const existingButInvalid: string[] = [];
+    const missing: string[] = [];
+    const runtimeState = await this.inspectRuntimeState(nodeResource, runtimeResource, gatewayResource);
 
-    if (systemNode.success) {
-      reusableComponents.push('node');
-      if (!nodeResource) warnings.push('System Node is already available; offline Node package is not required for this install plan.');
-      if (nodeResource) missingButOptionalResources.push(nodeResource.id);
-    } else if (!nodeResource) {
-      blockers.push('System Node is unavailable and no macOS Node resource was resolved.');
+    if (runtimeState.node.exists) {
+      if (runtimeState.node.valid) {
+        existingAndValid.push(this.componentNode);
+        reusableComponents.push(this.componentNode);
+        await this.logService.info(`macOS install plan: reusing system node (${runtimeState.node.detail}).`, 'platform');
+      } else {
+        existingButInvalid.push(this.componentNode);
+        repairableComponents.push(this.componentNode);
+        warnings.push(`System Node exists but does not meet requirements (${runtimeState.node.detail}); repair/reinstall may be needed.`);
+      }
+      if (!nodeResource) warnings.push('Node offline package is absent, but system Node already exists so the Node resource requirement is skipped.');
+      else missingButOptionalResources.push(nodeResource.id);
+    } else {
+      missing.push(this.componentNode);
+      if (!nodeResource) {
+        blockers.push('System Node is unavailable and no macOS Node resource was resolved.');
+      } else {
+        await this.logService.info('macOS install plan: system node missing; offline Node resource will be used for install/repair.', 'platform');
+      }
     }
 
-    if (runtimeDirExists) {
-      reusableComponents.push('runtime');
-      repairableComponents.push('runtime');
-      if (!runtimeResource) warnings.push('Existing runtime directory detected; runtime package can be treated as optional for validate/repair.');
-      if (runtimeResource) missingButOptionalResources.push(runtimeResource.id);
-    } else if (!runtimeResource) {
-      blockers.push('No runtime resource is available and no existing runtime directory can be reused.');
+    if (runtimeState.runtime.exists) {
+      if (runtimeState.runtime.valid) existingAndValid.push(this.componentRuntime);
+      else existingButInvalid.push(this.componentRuntime);
+      reusableComponents.push(this.componentRuntime);
+      repairableComponents.push(this.componentRuntime);
+      await this.logService.info(`macOS install plan: existing runtime will be reused (${runtimeState.runtime.detail}).`, 'platform');
+      if (!runtimeResource) warnings.push('Runtime package is absent, but an existing runtime can be validated/repaired and reused.');
+      else missingButOptionalResources.push(runtimeResource.id);
+    } else {
+      missing.push(this.componentRuntime);
+      if (!runtimeResource) blockers.push('No runtime resource is available and no existing runtime directory can be reused.');
     }
 
-    if (gatewayDirExists) {
-      reusableComponents.push('gateway-bundle');
-      repairableComponents.push('gateway-bundle');
-      if (!gatewayResource) warnings.push('Existing gateway directory detected; gateway bundle can be treated as optional for validate/repair.');
-      if (gatewayResource) missingButOptionalResources.push(gatewayResource.id);
-    } else if (!gatewayResource) {
-      blockers.push('No gateway bundle is available and no existing gateway directory can be reused.');
+    if (runtimeState.gateway.exists) {
+      if (runtimeState.gateway.valid) existingAndValid.push(this.componentGateway);
+      else existingButInvalid.push(this.componentGateway);
+      reusableComponents.push(this.componentGateway);
+      repairableComponents.push(this.componentGateway);
+      await this.logService.info(`macOS install plan: existing gateway assets will be reused (${runtimeState.gateway.detail}).`, 'platform');
+      if (!gatewayResource) warnings.push('Gateway bundle is absent, but an existing gateway directory can be validated/repaired and reused.');
+      else missingButOptionalResources.push(gatewayResource.id);
+    } else {
+      missing.push(this.componentGateway);
+      if (!gatewayResource) blockers.push('No gateway bundle is available and no existing gateway directory can be reused.');
     }
 
     const plan: InstallPlan = {
@@ -138,6 +164,9 @@ export class MacOSAdapter extends BasePlatformAdapter {
       resourceIds: resolved.resources.map((resource) => resource.id),
       requiresAdmin: false,
       requiresNetwork: resolved.resources.some((resource) => (resource.sources ?? []).some((source) => source.type !== 'local-import')),
+      existingAndValid,
+      existingButInvalid,
+      missing,
       blockers,
       warnings,
       reusableComponents,
@@ -146,7 +175,22 @@ export class MacOSAdapter extends BasePlatformAdapter {
       steps: [
         {id: 'resolve-manifest', title: 'Resolve macOS resource bundle', status: 'completed'},
         {id: 'prepare-runtime', title: 'Prepare native macOS runtime assets', status: compatibility.level === 'unsupported' ? 'blocked' : 'ready'},
-        {id: 'install-runtime', title: 'Install native runtime', status: compatibility.level === 'unsupported' ? 'blocked' : repairableComponents.length > 0 ? 'completed' : 'ready'},
+        {
+          id: 'install-runtime',
+          title: 'Install native runtime',
+          status: compatibility.level === 'unsupported'
+            ? 'blocked'
+            : existingAndValid.includes(this.componentRuntime)
+              ? 'completed'
+              : repairableComponents.includes(this.componentRuntime)
+                ? 'ready'
+                : 'ready',
+          notes: existingAndValid.includes(this.componentRuntime)
+            ? ['Existing runtime detected; install will be skipped in favor of validate/run.']
+            : repairableComponents.includes(this.componentRuntime)
+              ? ['Existing runtime detected but requires validate/repair before reuse.']
+              : ['No reusable runtime detected; fresh install/deploy path will be used.'],
+        },
       ],
     };
 
@@ -195,9 +239,9 @@ export class MacOSAdapter extends BasePlatformAdapter {
     const nodeResource = this.findResource(prepared.resolved.resources, 'node');
     const runtimeResource = this.findResource(prepared.resolved.resources, 'runtime');
     const gatewayResource = this.findResource(prepared.resolved.resources, 'gateway-bundle');
-    const systemNodeReusable = (plan.reusableComponents ?? []).includes('node');
-    const runtimeReusable = (plan.reusableComponents ?? []).includes('runtime');
-    const gatewayReusable = (plan.reusableComponents ?? []).includes('gateway-bundle');
+    const systemNodeReusable = (plan.reusableComponents ?? []).includes(this.componentNode);
+    const runtimeReusable = (plan.reusableComponents ?? []).includes(this.componentRuntime);
+    const gatewayReusable = (plan.reusableComponents ?? []).includes(this.componentGateway);
     if (!nodeResource && !systemNodeReusable) {
       return this.buildInstallFailure(plan, 'macOS install plan is missing required node/runtime/gateway resources.', {
         executedSteps,
@@ -228,7 +272,7 @@ export class MacOSAdapter extends BasePlatformAdapter {
     ]);
     executedSteps.push(this.createStep('prepare-directories', true, `Prepared ${this.options.paths.runtimeRoot}`));
     if (nodeResource) executedSteps.push(await this.installNodeArchive(nodeResource));
-    else executedSteps.push(this.createStep('install-node', systemNodeReusable, systemNodeReusable ? 'System Node already available; skipped offline Node install.' : 'Node resource unavailable.'));
+    else executedSteps.push(this.createStep('install-node', systemNodeReusable, systemNodeReusable ? 'System Node already available; skipped offline Node install because system Node is being reused.' : 'Node resource unavailable.'));
     if (runtimeResource) executedSteps.push(await this.extractArchiveResource(runtimeResource, path.join(this.options.paths.runtimeRoot, 'runtime'), 'deploy-runtime'));
     else executedSteps.push(this.createStep('deploy-runtime', runtimeReusable, runtimeReusable ? 'Existing runtime directory detected; switching to validate/repair path.' : 'Runtime resource unavailable.'));
     if (gatewayResource) executedSteps.push(await this.extractArchiveResource(gatewayResource, path.join(this.options.paths.runtimeRoot, 'gateway'), 'deploy-gateway'));
@@ -490,5 +534,53 @@ export class MacOSAdapter extends BasePlatformAdapter {
 
   private buildSummary(manifest: ResourceManifest, mode: string, level: string) {
     return `macOS install plan (${mode}) built from manifest ${manifest.productVersion} with compatibility=${level}.`;
+  }
+
+  private async inspectRuntimeState(
+    nodeResource: ResourceDefinition | undefined,
+    runtimeResource: ResourceDefinition | undefined,
+    gatewayResource: ResourceDefinition | undefined,
+  ) {
+    const systemNode = await this.commandService.runCommand('node', ['-v'], {source: 'platform', timeoutMs: 5000});
+    const nodeVersion = this.extractNodeVersion(systemNode.stdout || systemNode.stderr);
+    const nodeMajor = nodeVersion ? Number.parseInt(nodeVersion.split('.')[0] ?? '0', 10) : 0;
+    const runtimeDir = path.join(this.options.paths.runtimeRoot, 'runtime');
+    const gatewayDir = path.join(this.options.paths.runtimeRoot, 'gateway');
+    const runtimeDirExists = await fs.pathExists(runtimeDir);
+    const gatewayDirExists = await fs.pathExists(gatewayDir);
+    const runtimePayloadAvailable = await this.hasLocalResourcePayload(runtimeResource);
+    const gatewayPayloadAvailable = await this.hasLocalResourcePayload(gatewayResource);
+
+    return {
+      node: {
+        exists: systemNode.success,
+        valid: systemNode.success && nodeMajor >= 22,
+        detail: systemNode.success ? (nodeVersion ? `version=${nodeVersion}` : systemNode.stdout.trim()) : 'not detected',
+        payloadAvailable: Boolean(nodeResource),
+      },
+      runtime: {
+        exists: runtimeDirExists || runtimePayloadAvailable,
+        valid: runtimeDirExists,
+        detail: runtimeDirExists ? `Runtime directory detected at ${runtimeDir}.` : runtimePayloadAvailable ? 'Runtime payload detected for deployment.' : 'Runtime not detected.',
+      },
+      gateway: {
+        exists: gatewayDirExists || gatewayPayloadAvailable,
+        valid: gatewayDirExists,
+        detail: gatewayDirExists ? `Gateway directory detected at ${gatewayDir}.` : gatewayPayloadAvailable ? 'Gateway payload detected for deployment.' : 'Gateway assets not detected.',
+      },
+    };
+  }
+
+  private extractNodeVersion(output: string) {
+    const match = output.match(/v?(\d+\.\d+\.\d+)/);
+    return match?.[1] ?? null;
+  }
+
+  private async hasLocalResourcePayload(resource: ResourceDefinition | undefined) {
+    if (!resource) return false;
+    const prepared = this.getPreparedInstallState();
+    const cached = prepared ? await prepared.context.cacheManager.getCachedFile(resource) : null;
+    if (cached && await fs.pathExists(cached)) return true;
+    return fs.pathExists(path.join(this.options.paths.offlineResourcesRoot, resource.relativePath));
   }
 }

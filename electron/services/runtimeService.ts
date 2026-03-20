@@ -383,7 +383,14 @@ export class RuntimeService {
         selectedMode: plan.mode,
         selectedBundleId: plan.selectedBundleId,
         resourceCount: plan.resourceIds.length,
+        existingAndValid: plan.existingAndValid,
+        existingButInvalid: plan.existingButInvalid,
+        missing: plan.missing,
         blockers: plan.blockers,
+        warnings: plan.warnings,
+        reusableComponents: plan.reusableComponents,
+        repairableComponents: plan.repairableComponents,
+        missingButOptionalResources: plan.missingButOptionalResources,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -393,7 +400,14 @@ export class RuntimeService {
         compatibility: 'unsupported',
         recommendedModes: [],
         resourceCount: 0,
+        existingAndValid: [],
+        existingButInvalid: [],
+        missing: [],
         blockers: [message],
+        warnings: [],
+        reusableComponents: [],
+        repairableComponents: [],
+        missingButOptionalResources: [],
       };
     }
   }

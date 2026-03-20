@@ -238,7 +238,14 @@ export interface InstallContextSummary {
   selectedMode?: string;
   selectedBundleId?: string;
   resourceCount: number;
+  existingAndValid: string[];
+  existingButInvalid: string[];
+  missing: string[];
   blockers: string[];
+  warnings: string[];
+  reusableComponents: string[];
+  repairableComponents: string[];
+  missingButOptionalResources: string[];
 }
 
 export interface EnvironmentStatus {

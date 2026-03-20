@@ -17,6 +17,11 @@ import {
 export class WindowsAdapter extends BasePlatformAdapter {
   protected readonly platform = 'windows' as const;
 
+  private readonly componentNode = 'node';
+  private readonly componentWsl = 'wsl';
+  private readonly componentRuntime = 'runtime';
+  private readonly componentGateway = 'gateway-bundle';
+
   async detectEnvironment(): Promise<EnvironmentDetection> {
     const platformInfo = await this.getPlatformInfo();
     const blockers: string[] = [];
@@ -99,44 +104,92 @@ export class WindowsAdapter extends BasePlatformAdapter {
     const reusableComponents: string[] = [];
     const repairableComponents: string[] = [];
     const missingButOptionalResources: string[] = [];
-    const distroName = this.options.distroName ?? 'OpenClaw-Runtime';
-    const systemNode = await this.commandService.runCommand('node', ['-v'], {source: 'platform', timeoutMs: 5000});
-    const runtimeDirExists = await fs.pathExists(path.join(this.options.paths.runtimeRoot, 'runtime'));
-    const gatewayDirExists = await fs.pathExists(path.join(this.options.paths.runtimeRoot, 'gateway'));
-    const distroList = await this.commandService.runCommand('wsl.exe', ['-l', '-v'], {source: 'platform', timeoutMs: 15000});
-    const distroLines = distroList.success ? distroList.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [];
-    const distroExists = distroLines.some((line) => line.includes(distroName));
-    const defaultDistroExists = distroLines.some((line) => line.startsWith('*'));
+    const existingAndValid: string[] = [];
+    const existingButInvalid: string[] = [];
+    const missing: string[] = [];
+    const runtimeState = await this.inspectRuntimeState(nodeResource, runtimeResource, rootfsResource, gatewayResource);
 
-    if (systemNode.success) {
-      reusableComponents.push('node');
-      if (!nodeResource) warnings.push('System Node is already available; offline Node package is not required for this install plan.');
-      if (nodeResource) missingButOptionalResources.push(nodeResource.id);
-    } else if (!nodeResource) {
-      blockers.push('System Node is unavailable and no offline Node resource was resolved.');
+    if (runtimeState.node.exists) {
+      if (runtimeState.node.valid) {
+        existingAndValid.push(this.componentNode);
+        reusableComponents.push(this.componentNode);
+        await this.logService.info(`Windows install plan: reusing system node (${runtimeState.node.detail}).`, 'platform');
+      } else {
+        existingButInvalid.push(this.componentNode);
+        repairableComponents.push(this.componentNode);
+        warnings.push(`System Node exists but does not meet requirements (${runtimeState.node.detail}); repair/reinstall may be needed.`);
+        await this.logService.warn(`Windows install plan: system node exists but is invalid (${runtimeState.node.detail}).`, 'platform');
+      }
+      if (!nodeResource) {
+        warnings.push('Node offline package is absent, but system Node already exists so the Node resource requirement is skipped.');
+      } else {
+        missingButOptionalResources.push(nodeResource.id);
+      }
+    } else {
+      missing.push(this.componentNode);
+      if (nodeResource) {
+        await this.logService.info('Windows install plan: system node missing; offline Node resource will be used for install/repair.', 'platform');
+      } else {
+        blockers.push('System Node is unavailable and no offline Node resource was resolved.');
+        await this.logService.warn('Windows install plan: blocking because Node is missing and no offline Node resource is available.', 'platform');
+      }
     }
 
-    if (distroExists || runtimeDirExists) {
-      reusableComponents.push('runtime');
-      repairableComponents.push('runtime');
-      if (!(runtimeResource || rootfsResource)) {
-        warnings.push('Existing runtime/distro detected; runtime package is missing but validation/repair can continue.');
+    if (runtimeState.wsl.exists) {
+      if (runtimeState.wsl.valid) {
+        existingAndValid.push(this.componentWsl);
+        reusableComponents.push(this.componentWsl);
+      } else {
+        existingButInvalid.push(this.componentWsl);
+        repairableComponents.push(this.componentWsl);
+        warnings.push(`WSL exists but is not fully ready (${runtimeState.wsl.detail}); repair path may be required.`);
       }
+      if (!runtimeState.wsl.defaultDistroConfigured && runtimeState.runtime.exists) {
+        warnings.push('WSL is enabled and OpenClaw-Runtime exists, but no default distro is configured; this remains a warning only.');
+      }
+    } else {
+      missing.push(this.componentWsl);
+      if (!environment.supported) {
+        blockers.push('Windows adapter is not running on a Windows host.');
+      }
+    }
+
+    if (runtimeState.runtime.exists) {
+      if (runtimeState.runtime.valid) {
+        existingAndValid.push(this.componentRuntime);
+      } else {
+        existingButInvalid.push(this.componentRuntime);
+      }
+      reusableComponents.push(this.componentRuntime);
+      repairableComponents.push(this.componentRuntime);
+      await this.logService.info(`Windows install plan: existing runtime/rootfs will be reused (${runtimeState.runtime.detail}).`, 'platform');
+      if (!runtimeResource) warnings.push('Runtime package is absent, but an existing runtime can be validated/repaired and reused.');
+      if (!rootfsResource) warnings.push('Rootfs package is absent, but an existing runtime/rootfs can be validated/repaired and reused.');
       if (runtimeResource) missingButOptionalResources.push(runtimeResource.id);
       if (rootfsResource) missingButOptionalResources.push(rootfsResource.id);
-    } else if (!(runtimeResource || rootfsResource)) {
-      blockers.push('No runtime/rootfs resource is available and no existing runtime can be reused.');
+    } else {
+      missing.push(this.componentRuntime);
+      if (runtimeResource || rootfsResource) {
+        await this.logService.info('Windows install plan: no reusable runtime found; fresh runtime import/install is required.', 'platform');
+      } else {
+        blockers.push('No existing runtime/rootfs was detected and no runtime/rootfs resource is available for fresh install.');
+        await this.logService.warn('Windows install plan: blocking because runtime is missing and no runtime/rootfs payload is available.', 'platform');
+      }
     }
 
-    if (gatewayDirExists) {
-      reusableComponents.push('gateway-bundle');
-      repairableComponents.push('gateway-bundle');
+    if (runtimeState.gateway.exists) {
+      if (runtimeState.gateway.valid) {
+        existingAndValid.push(this.componentGateway);
+      } else {
+        existingButInvalid.push(this.componentGateway);
+      }
+      reusableComponents.push(this.componentGateway);
+      repairableComponents.push(this.componentGateway);
+      await this.logService.info('Windows install plan: existing gateway assets will be reused/validated.', 'platform');
       if (gatewayResource) missingButOptionalResources.push(gatewayResource.id);
-      else warnings.push('Existing gateway directory detected; gateway bundle resource can be treated as optional for validate/repair.');
-    }
-
-    if (!defaultDistroExists && distroExists) {
-      warnings.push('WSL is enabled and OpenClaw-Runtime exists, but no default distro is configured; this is treated as a warning only.');
+      else warnings.push('Gateway bundle resource is absent, but an existing gateway directory can be validated/repaired.');
+    } else {
+      missing.push(this.componentGateway);
     }
 
     const plan: InstallPlan = {
@@ -148,6 +201,9 @@ export class WindowsAdapter extends BasePlatformAdapter {
       resourceIds: resolved.resources.map((resource) => resource.id),
       requiresAdmin: mode === 'full' || mode === 'importable',
       requiresNetwork: resolved.resources.some((resource) => (resource.sources ?? []).some((source) => source.type !== 'local-import')),
+      existingAndValid,
+      existingButInvalid,
+      missing,
       blockers,
       warnings,
       reusableComponents,
@@ -156,7 +212,22 @@ export class WindowsAdapter extends BasePlatformAdapter {
       steps: [
         {id: 'resolve-manifest', title: 'Resolve Windows resource bundle', status: 'completed'},
         {id: 'prepare-runtime', title: 'Prepare Windows runtime assets', status: compatibility.level === 'unsupported' ? 'blocked' : 'ready'},
-        {id: 'install-runtime', title: 'Install/import runtime', status: compatibility.level === 'unsupported' ? 'blocked' : repairableComponents.includes('runtime') ? 'completed' : 'ready'},
+        {
+          id: 'install-runtime',
+          title: 'Install/import runtime',
+          status: compatibility.level === 'unsupported'
+            ? 'blocked'
+            : existingAndValid.includes(this.componentRuntime)
+              ? 'completed'
+              : repairableComponents.includes(this.componentRuntime)
+                ? 'ready'
+                : 'ready',
+          notes: existingAndValid.includes(this.componentRuntime)
+            ? ['Existing runtime detected; install will be skipped in favor of validate/run.']
+            : repairableComponents.includes(this.componentRuntime)
+              ? ['Existing runtime detected but requires validate/repair before reuse.']
+              : ['No reusable runtime detected; fresh install/import path will be used.'],
+        },
       ],
     };
 
@@ -218,8 +289,8 @@ export class WindowsAdapter extends BasePlatformAdapter {
     const rootfsResource = this.findResource(prepared.resolved.resources, 'rootfs');
     const gatewayResource = this.findResource(prepared.resolved.resources, 'gateway-bundle');
 
-    const systemNodeReusable = (plan.reusableComponents ?? []).includes('node');
-    const runtimeReusable = (plan.reusableComponents ?? []).includes('runtime');
+    const systemNodeReusable = (plan.reusableComponents ?? []).includes(this.componentNode);
+    const runtimeReusable = (plan.reusableComponents ?? []).includes(this.componentRuntime);
 
     if (!nodeResource && !systemNodeReusable) {
       return this.buildInstallFailure(plan, 'Windows install plan is missing required node/runtime resources.', {
@@ -247,7 +318,7 @@ export class WindowsAdapter extends BasePlatformAdapter {
     if (nodeResource) {
       executedSteps.push(await this.installNodeResource(nodeResource));
     } else {
-      executedSteps.push(this.createStep('install-node', systemNodeReusable, systemNodeReusable ? 'System Node already available; skipped offline Node install.' : 'Node resource unavailable.'));
+      executedSteps.push(this.createStep('install-node', systemNodeReusable, systemNodeReusable ? 'System Node already available; skipped offline Node install because system Node is being reused.' : 'Node resource unavailable.'));
     }
 
     const rootfsPath = rootfsResource ? await prepared.context.cacheManager.getCachedFile(rootfsResource) : null;
@@ -549,5 +620,67 @@ export class WindowsAdapter extends BasePlatformAdapter {
 
   private buildSummary(manifest: ResourceManifest, mode: string, level: string) {
     return `Windows install plan (${mode}) built from manifest ${manifest.productVersion} with compatibility=${level}.`;
+  }
+
+  private async inspectRuntimeState(
+    nodeResource: ResourceDefinition | undefined,
+    runtimeResource: ResourceDefinition | undefined,
+    rootfsResource: ResourceDefinition | undefined,
+    gatewayResource: ResourceDefinition | undefined,
+  ) {
+    const distroName = this.options.distroName ?? 'OpenClaw-Runtime';
+    const systemNode = await this.commandService.runCommand('node', ['-v'], {source: 'platform', timeoutMs: 5000});
+    const nodeVersion = this.extractNodeVersion(systemNode.stdout || systemNode.stderr);
+    const nodeMajor = nodeVersion ? Number.parseInt(nodeVersion.split('.')[0] ?? '0', 10) : 0;
+    const runtimeDir = path.join(this.options.paths.runtimeRoot, 'runtime');
+    const gatewayDir = path.join(this.options.paths.runtimeRoot, 'gateway');
+    const runtimeDirExists = await fs.pathExists(runtimeDir);
+    const gatewayDirExists = await fs.pathExists(gatewayDir);
+    const distroList = await this.commandService.runCommand('wsl.exe', ['-l', '-v'], {source: 'platform', timeoutMs: 15000});
+    const distroLines = distroList.success ? distroList.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [];
+    const distroExists = distroLines.some((line) => line.includes(distroName));
+    const defaultDistroConfigured = distroLines.some((line) => line.startsWith('*'));
+    const rootfsAvailable = await this.hasLocalResourcePayload(rootfsResource);
+    const runtimePayloadAvailable = await this.hasLocalResourcePayload(runtimeResource) || rootfsAvailable;
+    const gatewayPayloadAvailable = await this.hasLocalResourcePayload(gatewayResource);
+
+    return {
+      node: {
+        exists: systemNode.success,
+        valid: systemNode.success && nodeMajor >= 22,
+        detail: systemNode.success ? (nodeVersion ? `version=${nodeVersion}` : systemNode.stdout.trim()) : 'not detected',
+        payloadAvailable: Boolean(nodeResource),
+      },
+      wsl: {
+        exists: distroList.success,
+        valid: distroList.success,
+        detail: distroList.success ? 'WSL command available.' : (distroList.stderr || distroList.stdout || 'WSL command unavailable'),
+        defaultDistroConfigured,
+      },
+      runtime: {
+        exists: distroExists || runtimeDirExists || rootfsAvailable,
+        valid: distroExists || runtimeDirExists,
+        detail: distroExists ? `WSL distro ${distroName} detected.` : runtimeDirExists ? `Runtime directory detected at ${runtimeDir}.` : rootfsAvailable ? 'Rootfs payload detected for fresh import.' : 'Runtime not detected.',
+        payloadAvailable: runtimePayloadAvailable,
+      },
+      gateway: {
+        exists: gatewayDirExists || gatewayPayloadAvailable,
+        valid: gatewayDirExists,
+        detail: gatewayDirExists ? `Gateway directory detected at ${gatewayDir}.` : gatewayPayloadAvailable ? 'Gateway bundle payload detected.' : 'Gateway assets not detected.',
+      },
+    };
+  }
+
+  private extractNodeVersion(output: string) {
+    const match = output.match(/v?(\d+\.\d+\.\d+)/);
+    return match?.[1] ?? null;
+  }
+
+  private async hasLocalResourcePayload(resource: ResourceDefinition | undefined) {
+    if (!resource) return false;
+    const prepared = this.getPreparedInstallState();
+    const cached = prepared ? await prepared.context.cacheManager.getCachedFile(resource) : null;
+    if (cached && await fs.pathExists(cached)) return true;
+    return fs.pathExists(path.join(this.options.paths.offlineResourcesRoot, resource.relativePath));
   }
 }

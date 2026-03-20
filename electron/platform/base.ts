@@ -53,6 +53,9 @@ export interface InstallPlan {
   requiresAdmin: boolean;
   requiresNetwork: boolean;
   steps: InstallPlanStep[];
+  existingAndValid: string[];
+  existingButInvalid: string[];
+  missing: string[];
   blockers: string[];
   warnings: string[];
   reusableComponents: string[];

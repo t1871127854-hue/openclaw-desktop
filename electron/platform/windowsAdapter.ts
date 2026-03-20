@@ -95,6 +95,14 @@ export class WindowsAdapter extends BasePlatformAdapter {
       ? context.preferredMode
       : compatibility.recommendedModes[0] ?? 'core';
     const resolved = await context.resourceManager.resolveResources({mode, platform: 'windows', arch: environment.platformInfo.arch});
+    await this.logService.info(`InstallPlan resources: ${resolved.resources.length}`, 'platform');
+    await this.logService.info(`Resource IDs: ${resolved.resources.map((resource) => resource.id).join(', ') || '(none)'}`, 'platform');
+    if (resolved.resources.length === 0) {
+      await this.logService.error(
+        `InstallPlan resource resolution returned 0 resources for windows/${environment.platformInfo.arch}/${mode}. bundle=${resolved.bundle?.id ?? 'none'}, manifest=${manifest.productVersion}`,
+        'platform',
+      );
+    }
     const nodeResource = this.findResource(resolved.resources, 'node');
     const runtimeResource = this.findResource(resolved.resources, 'runtime');
     const rootfsResource = this.findResource(resolved.resources, 'rootfs');

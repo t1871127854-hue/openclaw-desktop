@@ -46,9 +46,9 @@ export class LocalImportManager {
     const imported: string[] = [];
 
     for (const resource of resources) {
-      const sourcePath = path.join(baseDir, resource.filename);
-      if (!(await fs.pathExists(sourcePath))) {
-        await this.logService.warn(`Local import file missing for ${resource.id}: ${sourcePath}`, 'resources');
+      const sourcePath = await this.resolveSourcePath(resource, baseDir);
+      if (!sourcePath) {
+        await this.logService.warn(`Local import file missing for ${resource.id}: checked filename/relativePath/source.path candidates under ${baseDir}`, 'resources');
         continue;
       }
       await this.cacheManager.putCachedFile(resource, sourcePath);
@@ -57,5 +57,28 @@ export class LocalImportManager {
 
     await this.logService.success(`Imported ${imported.length} local resource(s) into cache`, 'resources');
     return imported;
+  }
+
+  private async resolveSourcePath(resource: ResourceDefinition, baseDir: string) {
+    const candidates = [
+      path.join(baseDir, resource.relativePath),
+      path.join(baseDir, resource.filename),
+      ...((resource.sources ?? [])
+        .filter((source) => source.type === 'local-import')
+        .flatMap((source) => {
+          const sourcePath = source.path?.trim();
+          if (!sourcePath) return [];
+          return [
+            path.isAbsolute(sourcePath) ? sourcePath : path.resolve(baseDir, sourcePath),
+            path.isAbsolute(sourcePath) ? sourcePath : path.resolve(process.cwd(), sourcePath),
+          ];
+        })),
+    ];
+
+    for (const candidate of [...new Set(candidates)]) {
+      if (await fs.pathExists(candidate)) return candidate;
+    }
+
+    return null;
   }
 }

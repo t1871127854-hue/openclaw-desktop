@@ -35,7 +35,7 @@ export class LocalImportManager {
   }
 
   validatePlatformArch(manifest: ResourceManifest, platform: SupportedPlatform, arch: SupportedArch) {
-    const compatible = manifest.resources.every((resource) => resource.platform === platform && resource.arch === arch);
+    const compatible = (manifest.resources ?? []).every((resource) => resource.platform === platform && resource.arch === arch);
     return {
       compatible,
       reason: compatible ? 'ok' : `Manifest contains resources outside ${platform}/${arch}`,

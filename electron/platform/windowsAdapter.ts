@@ -147,7 +147,7 @@ export class WindowsAdapter extends BasePlatformAdapter {
       selectedBundleId: resolved.bundle?.id,
       resourceIds: resolved.resources.map((resource) => resource.id),
       requiresAdmin: mode === 'full' || mode === 'importable',
-      requiresNetwork: resolved.resources.some((resource) => resource.sources.some((source) => source.type !== 'local-import')),
+      requiresNetwork: resolved.resources.some((resource) => (resource.sources ?? []).some((source) => source.type !== 'local-import')),
       blockers,
       warnings,
       reusableComponents,
@@ -202,7 +202,7 @@ export class WindowsAdapter extends BasePlatformAdapter {
     }
 
     const missingResources = await prepared.context.resourceManager.getMissingResources(prepared.resolved.resources);
-    const blockingMissingResources = missingResources.filter((resource) => !plan.missingButOptionalResources.includes(resource.id));
+    const blockingMissingResources = missingResources.filter((resource) => !(plan.missingButOptionalResources ?? []).includes(resource.id));
     if (blockingMissingResources.length > 0) {
       await this.logService.warn(`Windows install blocked by missing resources: ${this.summarizeMissingResources(missingResources).join(', ')}`, 'platform');
       return this.buildInstallFailure(plan, 'Required Windows resources are missing from cache/import bundle.', {
@@ -218,8 +218,8 @@ export class WindowsAdapter extends BasePlatformAdapter {
     const rootfsResource = this.findResource(prepared.resolved.resources, 'rootfs');
     const gatewayResource = this.findResource(prepared.resolved.resources, 'gateway-bundle');
 
-    const systemNodeReusable = plan.reusableComponents.includes('node');
-    const runtimeReusable = plan.reusableComponents.includes('runtime');
+    const systemNodeReusable = (plan.reusableComponents ?? []).includes('node');
+    const runtimeReusable = (plan.reusableComponents ?? []).includes('runtime');
 
     if (!nodeResource && !systemNodeReusable) {
       return this.buildInstallFailure(plan, 'Windows install plan is missing required node/runtime resources.', {
@@ -511,7 +511,7 @@ export class WindowsAdapter extends BasePlatformAdapter {
     for (const resource of resources) {
       const resourcePath = path.join(this.options.paths.cacheRoot, resource.relativePath);
       const exists = await fs.pathExists(resourcePath);
-      const optionalByPlan = Boolean(plan?.missingButOptionalResources.includes(resource.id));
+      const optionalByPlan = Boolean(plan?.missingButOptionalResources?.includes(resource.id));
       checks.push({id: `resource-${resource.id}`, title: `Resource ${resource.id}`, passed: exists, detail: resourcePath, blocking: !resource.optional && !optionalByPlan});
     }
     checks.push({id: 'wsl-distro', title: 'WSL distro registered', passed: distroExists, detail: distroExists ? distroName : 'Distro not registered yet.', blocking: false});

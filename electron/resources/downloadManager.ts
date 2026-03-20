@@ -27,7 +27,8 @@ export class DownloadManager {
 
   listSources(resource: ResourceDefinition, sourcePriority: ResourceSourceKind[] = []) {
     const priority = sourcePriority.length > 0 ? sourcePriority : ['local-import', 'lan', 'mirror-cn', 'official', 'custom'];
-    return [...resource.sources]
+    const sources = Array.isArray(resource.sources) ? resource.sources : [];
+    return [...sources]
       .filter((source) => source.enabled !== false)
       .sort((left, right) => {
         const leftRank = priority.indexOf(left.type);

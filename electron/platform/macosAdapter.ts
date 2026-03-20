@@ -137,7 +137,7 @@ export class MacOSAdapter extends BasePlatformAdapter {
       selectedBundleId: resolved.bundle?.id,
       resourceIds: resolved.resources.map((resource) => resource.id),
       requiresAdmin: false,
-      requiresNetwork: resolved.resources.some((resource) => resource.sources.some((source) => source.type !== 'local-import')),
+      requiresNetwork: resolved.resources.some((resource) => (resource.sources ?? []).some((source) => source.type !== 'local-import')),
       blockers,
       warnings,
       reusableComponents,
@@ -182,7 +182,7 @@ export class MacOSAdapter extends BasePlatformAdapter {
     }
 
     const missingResources = await prepared.context.resourceManager.getMissingResources(prepared.resolved.resources);
-    const blockingMissingResources = missingResources.filter((resource) => !plan.missingButOptionalResources.includes(resource.id));
+    const blockingMissingResources = missingResources.filter((resource) => !(plan.missingButOptionalResources ?? []).includes(resource.id));
     if (blockingMissingResources.length > 0) {
       return this.buildInstallFailure(plan, 'Required macOS resources are missing from cache/import bundle.', {
         executedSteps,
@@ -195,9 +195,9 @@ export class MacOSAdapter extends BasePlatformAdapter {
     const nodeResource = this.findResource(prepared.resolved.resources, 'node');
     const runtimeResource = this.findResource(prepared.resolved.resources, 'runtime');
     const gatewayResource = this.findResource(prepared.resolved.resources, 'gateway-bundle');
-    const systemNodeReusable = plan.reusableComponents.includes('node');
-    const runtimeReusable = plan.reusableComponents.includes('runtime');
-    const gatewayReusable = plan.reusableComponents.includes('gateway-bundle');
+    const systemNodeReusable = (plan.reusableComponents ?? []).includes('node');
+    const runtimeReusable = (plan.reusableComponents ?? []).includes('runtime');
+    const gatewayReusable = (plan.reusableComponents ?? []).includes('gateway-bundle');
     if (!nodeResource && !systemNodeReusable) {
       return this.buildInstallFailure(plan, 'macOS install plan is missing required node/runtime/gateway resources.', {
         executedSteps,
@@ -453,7 +453,7 @@ export class MacOSAdapter extends BasePlatformAdapter {
     for (const resource of resources) {
       const resourcePath = path.join(this.options.paths.cacheRoot, resource.relativePath);
       const exists = await fs.pathExists(resourcePath);
-      const optionalByPlan = Boolean(plan?.missingButOptionalResources.includes(resource.id));
+      const optionalByPlan = Boolean(plan?.missingButOptionalResources?.includes(resource.id));
       checks.push({id: `resource-${resource.id}`, title: `Resource ${resource.id}`, passed: exists, detail: resourcePath, blocking: !resource.optional && !optionalByPlan});
     }
 

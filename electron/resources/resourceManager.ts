@@ -32,16 +32,33 @@ export class ResourceManager {
     const manifest = await this.ensureManifestLoaded();
     const bundle = this.findBundle(manifest, request);
     const directResources = bundle
-      ? bundle.resourceIds.map((resourceId) => manifest.resources.find((resource) => resource.id === resourceId)).filter((resource): resource is ResourceDefinition => Boolean(resource))
-      : manifest.resources.filter((resource) => resource.platform === request.platform && resource.arch === request.arch && resource.modeTags.includes(request.mode));
+      ? (bundle.resourceIds ?? [])
+          .map((resourceId) => {
+            const resource = (manifest.resources ?? []).find((candidate) => candidate.id === resourceId);
+            if (!resource) {
+              void this.logService.warn(`Bundle ${bundle.id} references missing resource ${resourceId}; skipping.`, 'resources');
+            }
+            return resource;
+          })
+          .filter((resource): resource is ResourceDefinition => Boolean(resource))
+      : (manifest.resources ?? []).filter(
+          (resource) =>
+            resource.platform === request.platform
+            && resource.arch === request.arch
+            && Array.isArray(resource.modeTags)
+            && resource.modeTags.includes(request.mode),
+        );
 
     const resourcesById = new Map(directResources.map((resource) => [resource.id, resource]));
     const missingDependencies: string[] = [];
     for (const resource of directResources) {
-      for (const dependency of resource.dependencies) {
-        const dependencyResource = manifest.resources.find((candidate) => candidate.id === dependency.resourceId);
+      for (const dependency of resource.dependencies ?? []) {
+        const dependencyResource = (manifest.resources ?? []).find((candidate) => candidate.id === dependency.resourceId);
         if (dependencyResource) resourcesById.set(dependencyResource.id, dependencyResource);
-        else missingDependencies.push(dependency.resourceId);
+        else {
+          missingDependencies.push(dependency.resourceId);
+          await this.logService.warn(`Missing dependency ${dependency.resourceId} referenced by ${resource.id}.`, 'resources');
+        }
       }
     }
 
@@ -51,9 +68,11 @@ export class ResourceManager {
 
   async getBundleResources(bundleId: string) {
     const manifest = await this.ensureManifestLoaded();
-    const bundle = manifest.bundles.find((item) => item.id === bundleId) ?? null;
+    const bundle = (manifest.bundles ?? []).find((item) => item.id === bundleId) ?? null;
     if (!bundle) return [];
-    return bundle.resourceIds.map((resourceId) => manifest.resources.find((resource) => resource.id === resourceId)).filter((resource): resource is ResourceDefinition => Boolean(resource));
+    return (bundle.resourceIds ?? [])
+      .map((resourceId) => (manifest.resources ?? []).find((resource) => resource.id === resourceId))
+      .filter((resource): resource is ResourceDefinition => Boolean(resource));
   }
 
   async getMissingResources(resources: ResourceDefinition[]) {
@@ -102,7 +121,7 @@ export class ResourceManager {
   }
 
   private findBundle(manifest: ResourceManifest, request: ResourceResolveRequest): ResourceBundle | null {
-    if (request.bundleId) return manifest.bundles.find((bundle) => bundle.id === request.bundleId) ?? null;
-    return manifest.bundles.find((bundle) => bundle.platform === request.platform && bundle.arch === request.arch && bundle.mode === request.mode) ?? null;
+    if (request.bundleId) return (manifest.bundles ?? []).find((bundle) => bundle.id === request.bundleId) ?? null;
+    return (manifest.bundles ?? []).find((bundle) => bundle.platform === request.platform && bundle.arch === request.arch && bundle.mode === request.mode) ?? null;
   }
 }

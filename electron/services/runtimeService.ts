@@ -959,7 +959,7 @@ export class RuntimeService {
 
     const activeManifest = remoteManifest ?? localManifest;
     if (activeManifest) {
-      const resourceByType = (type: string) => activeManifest.resources.find((resource: any) => resource.resourceType === type) ?? null;
+      const resourceByType = (type: string) => (activeManifest.resources ?? []).find((resource: any) => resource.resourceType === type) ?? null;
       const runtimeTarget = resourceByType('runtime')?.version ?? resourceByType('rootfs')?.version ?? null;
       const nodeTarget = resourceByType('node')?.version ?? null;
       const gatewayTarget = resourceByType('gateway-bundle')?.version ?? null;
@@ -1051,7 +1051,7 @@ export class RuntimeService {
         const targetTypes = target.component === 'runtime'
           ? ['runtime', 'rootfs']
           : [target.component];
-        const resource = remoteManifest.resources.find((candidate) =>
+        const resource = (remoteManifest.resources ?? []).find((candidate) =>
           targetTypes.includes(candidate.resourceType)
           && candidate.platform === environment.platform
           && candidate.arch === environment.arch,

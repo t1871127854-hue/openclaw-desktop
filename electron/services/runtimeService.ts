@@ -121,6 +121,7 @@ export class RuntimeService {
   async getStatus(): Promise<EnvironmentStatus> {
     try {
       await this.logService.info('Refreshing runtime status snapshot.', 'system');
+      await this.syncGatewayOverridesFromConfig();
       const persistedState = await this.storageService.readState();
       const [nodeDetails, wslDetails, offlineResources, port18789] = await Promise.all([
         this.detectNodeVersion(),
@@ -1389,8 +1390,23 @@ export class RuntimeService {
   }
 
   private async startPlatformGateway(preferredMode?: any) {
+    await this.syncGatewayOverridesFromConfig();
     await this.createPlatformPlan(preferredMode);
-    return this.platformAdapter.startGateway();
+    const result = await this.platformAdapter.startGateway();
+    if (!result.success && this.isDegradedUsableGatewayResult(result)) {
+      const fallback = await this.gatewayService.startGateway();
+      if (fallback.success) {
+        return fallback;
+      }
+      return {
+        ...result,
+        details: {
+          ...(result.details ?? {}),
+          fallback,
+        },
+      };
+    }
+    return result;
   }
 
   async checkPortUsage(port: number): Promise<PortUsageResult> {
@@ -1991,5 +2007,24 @@ export class RuntimeService {
 
   private isDegradedUsableGatewayResult(result: ActionResult) {
     return Boolean(result.details?.degradedButUsable);
+  }
+
+  private async syncGatewayOverridesFromConfig() {
+    const config = await this.storageService.readConfig().catch(() => ({} as Record<string, any>)) as Record<string, any>;
+    const gatewayDir = typeof config.gatewayDir === 'string'
+      ? config.gatewayDir
+      : typeof config.gateway?.directory === 'string'
+        ? config.gateway.directory
+        : undefined;
+    const gatewayEntry = typeof config.gatewayEntryPoint === 'string'
+      ? config.gatewayEntryPoint
+      : typeof config.gateway?.entryPoint === 'string'
+        ? config.gateway.entryPoint
+        : undefined;
+
+    if (gatewayDir) process.env.OPENCLAW_GATEWAY_DIR = gatewayDir;
+    else delete process.env.OPENCLAW_GATEWAY_DIR;
+    if (gatewayEntry) process.env.OPENCLAW_GATEWAY_ENTRY = gatewayEntry;
+    else delete process.env.OPENCLAW_GATEWAY_ENTRY;
   }
 }

@@ -212,6 +212,7 @@ export interface GatewayStatus {
   runtimeReady?: boolean;
   gatewayBundleReady?: boolean;
   gatewayEntrypointReady?: boolean;
+  gatewayWorkingDirectoryReady?: boolean;
   gatewaySpawnable?: boolean;
   degradedButUsable?: boolean;
   advice: string[];

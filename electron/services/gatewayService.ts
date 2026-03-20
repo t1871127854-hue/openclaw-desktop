@@ -16,6 +16,10 @@ interface ResolvedGatewayTarget {
   args: string[];
   entryPoint: string;
   useShell: boolean;
+  gatewayWorkingDirectoryReady: boolean;
+  gatewayEntrypointReady: boolean;
+  gatewayBundleReady: boolean;
+  gatewaySpawnable: boolean;
 }
 
 export class GatewayService {
@@ -32,23 +36,25 @@ export class GatewayService {
   ) {}
 
   async getStatus(portInfo?: {occupied: boolean; pid: number | null}): Promise<GatewayStatus> {
+    const resolvedTarget = await this.resolveGatewayTarget();
     return {
       running: Boolean(this.gatewayProcess && !this.gatewayProcess.killed) || Boolean(portInfo?.occupied),
       pid: this.gatewayPid ?? portInfo?.pid ?? null,
       port: 18789,
-      workingDirectory: this.gatewayWorkingDirectory,
-      entryPoint: this.gatewayEntryPoint,
+      workingDirectory: this.gatewayWorkingDirectory ?? resolvedTarget?.cwd ?? null,
+      entryPoint: this.gatewayEntryPoint ?? resolvedTarget?.entryPoint ?? null,
       commandLine: this.gatewayCommandLine,
-      placeholder: !this.gatewayEntryPoint,
-      gatewayBundleReady: Boolean(this.gatewayWorkingDirectory),
-      gatewayEntrypointReady: Boolean(this.gatewayEntryPoint),
-      gatewaySpawnable: Boolean(this.gatewayEntryPoint),
-      degradedButUsable: !this.gatewayEntryPoint,
-      advice: this.gatewayEntryPoint
+      placeholder: !(this.gatewayEntryPoint ?? resolvedTarget?.entryPoint),
+      gatewayBundleReady: resolvedTarget?.gatewayBundleReady ?? false,
+      gatewayEntrypointReady: resolvedTarget?.gatewayEntrypointReady ?? false,
+      gatewayWorkingDirectoryReady: resolvedTarget?.gatewayWorkingDirectoryReady ?? false,
+      gatewaySpawnable: resolvedTarget?.gatewaySpawnable ?? false,
+      degradedButUsable: !(this.gatewayEntryPoint ?? resolvedTarget?.entryPoint),
+      advice: (this.gatewayEntryPoint ?? resolvedTarget?.entryPoint)
         ? []
         : [
             'OpenClaw 运行时已就绪，Gateway 启动资源尚未配置。',
-            '可导入 gateway bundle，或通过 OPENCLAW_GATEWAY_DIR 指定真实 OpenClaw 工作目录。',
+            '可导入 gateway bundle，或通过配置文件/环境变量指定 Gateway 目录或入口。',
           ],
     };
   }
@@ -59,7 +65,16 @@ export class GatewayService {
       await this.logService.warn('No real Gateway entrypoint found in workspace/base path/env override.', 'gateway');
       return {
         success: false,
-        error: '未找到真实 Gateway 启动入口。请配置 OPENCLAW_GATEWAY_DIR 或补充 OpenClaw 工作目录。',
+        error: 'Gateway 未配置。请导入 gateway bundle，或在配置文件中指定 gatewayDir / gatewayEntryPoint。',
+        details: {
+          runtimeReady: true,
+          gatewayBundleReady: false,
+          gatewayEntrypointReady: false,
+          gatewayWorkingDirectoryReady: false,
+          gatewaySpawnable: false,
+          degradedButUsable: true,
+          repairItems: ['导入 gateway bundle', '指定 gateway 入口路径', '检查 gateway 目录'],
+        },
       };
     }
 
@@ -90,7 +105,17 @@ export class GatewayService {
     return {
       success: true,
       result: 'Gateway 已启动',
-      details: {pid: this.gatewayPid, entryPoint: this.gatewayEntryPoint, cwd: this.gatewayWorkingDirectory},
+      details: {
+        pid: this.gatewayPid,
+        entryPoint: this.gatewayEntryPoint,
+        cwd: this.gatewayWorkingDirectory,
+        runtimeReady: true,
+        gatewayBundleReady: target.gatewayBundleReady,
+        gatewayEntrypointReady: target.gatewayEntrypointReady,
+        gatewayWorkingDirectoryReady: target.gatewayWorkingDirectoryReady,
+        gatewaySpawnable: target.gatewaySpawnable,
+        degradedButUsable: false,
+      },
     };
   }
 
@@ -117,11 +142,18 @@ export class GatewayService {
 
   private async resolveGatewayTarget(): Promise<ResolvedGatewayTarget | null> {
     const configured = process.env.OPENCLAW_GATEWAY_DIR;
+    const configuredEntry = process.env.OPENCLAW_GATEWAY_ENTRY;
+    if (configuredEntry) {
+      const resolvedEntry = await this.resolveFromEntrypoint(configuredEntry, configured || path.dirname(configuredEntry));
+      if (resolvedEntry) return resolvedEntry;
+    }
     const candidates = [
       configured,
       path.join(this.paths.workspacePath, 'gateway'),
-      this.paths.workspacePath,
+      path.join(this.paths.basePath, 'runtime', 'gateway'),
       path.join(this.paths.basePath, 'gateway'),
+      path.join(this.paths.basePath, 'dist-electron'),
+      this.paths.workspacePath,
       path.join(this.paths.basePath, 'openclaw-gateway'),
     ].filter(Boolean) as string[];
 
@@ -160,6 +192,10 @@ export class GatewayService {
             args: ['run', scriptName],
             entryPoint: `npm run ${scriptName}`,
             useShell: false,
+            gatewayWorkingDirectoryReady: true,
+            gatewayEntrypointReady: true,
+            gatewayBundleReady: true,
+            gatewaySpawnable: true,
           };
         }
       }
@@ -173,11 +209,30 @@ export class GatewayService {
           args: [entry],
           entryPoint: entry,
           useShell: false,
+          gatewayWorkingDirectoryReady: true,
+          gatewayEntrypointReady: true,
+          gatewayBundleReady: true,
+          gatewaySpawnable: true,
         };
       }
     }
 
     return null;
+  }
+
+  private async resolveFromEntrypoint(entryPoint: string, cwd: string): Promise<ResolvedGatewayTarget | null> {
+    if (!(await fs.pathExists(entryPoint))) return null;
+    return {
+      cwd,
+      command: entryPoint.endsWith('.js') ? 'node' : entryPoint,
+      args: entryPoint.endsWith('.js') ? [entryPoint] : [],
+      entryPoint,
+      useShell: false,
+      gatewayWorkingDirectoryReady: await fs.pathExists(cwd),
+      gatewayEntrypointReady: true,
+      gatewayBundleReady: await fs.pathExists(cwd),
+      gatewaySpawnable: true,
+    };
   }
 
   private isAllowedGatewayPath(target: string, configuredPath?: string) {

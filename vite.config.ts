@@ -1,23 +1,19 @@
-import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
-import {defineConfig} from 'vite';
+import { defineConfig } from 'vite';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 
 export default defineConfig({
   plugins: [
     react(),
-    tailwindcss(),
     electron([
       {
         entry: 'electron/main.ts',
         vite: {
           build: {
             outDir: 'dist-electron',
-            rollupOptions: {
-              external: ['vite'],
-            },
+            sourcemap: true,
           },
         },
       },
@@ -31,6 +27,7 @@ export default defineConfig({
               fileName: () => 'preload.cjs',
             },
             outDir: 'dist-electron',
+            sourcemap: true,
             rollupOptions: {
               external: ['electron'],
             },
@@ -46,12 +43,11 @@ export default defineConfig({
     },
   },
   server: {
-    hmr: process.env.DISABLE_HMR !== 'true',
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:3000',
-        changeOrigin: true,
-      },
-    },
+    port: 5173,
+    strictPort: true,
+    hmr: true,
+  },
+  build: {
+    outDir: 'dist',
   },
 });

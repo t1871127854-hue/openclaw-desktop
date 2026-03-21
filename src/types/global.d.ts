@@ -1,8 +1,8 @@
-import type {OpenClawApi} from './api';
+import type { OpenClawApi } from './api';
 
 declare global {
   interface Window {
-    openClaw?: OpenClawApi;
+    openclawApi?: OpenClawApi;
   }
 }
 
